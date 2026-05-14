@@ -1,6 +1,6 @@
 # Tina
 
-> *"Tina, you fat lard, come get some dinner!"*
+> *"Tina, eat. Food. Eat the FOOD!"*
 
 ---
 
