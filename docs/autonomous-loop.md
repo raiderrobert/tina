@@ -2,7 +2,7 @@
 
 ## What it is
 
-The autonomous loop is a headless mode where Tina polls for work items, processes each one with an agent, and reports results — without human intervention during execution. A human reviews the output (a PR, a Jira comment, a diagnostic report) after the agent finishes, not while it's working.
+The autonomous loop is a headless mode where Tina polls for work items, processes each one with an agent, and reports results — without human intervention during execution. A human reviews the output after the agent finishes, not while it’s working.
 
 This is one capability of the toolkit, not the defining feature. The same `AgentHarness` that powers the interactive CLI powers the autonomous loop. The difference is configuration: which tools are loaded, which `ExecutionEnv` is used, and whether there's a person at the terminal.
 
@@ -24,8 +24,8 @@ It is not appropriate for exploratory work, architectural decisions, or tasks wh
 │                          TaskRunner                                 │
 │                                                                     │
 │  ┌──────────┐   ┌──────────┐   ┌──────────┐                       │
-│  │  Jira    │   │  GitHub  │   │  Custom  │    ◀── TaskSource      │
-│  │  Source  │   │  Source  │   │  Source  │        Protocol         │
+│  │ Source A │   │ Source B │   │ Source C │    ◀── TaskSource      │
+│  │          │   │          │   │          │        Protocol         │
 │  └────┬─────┘   └────┬─────┘   └────┬─────┘                       │
 │       │              │              │                               │
 │       └──────────────┼──────────────┘                               │
@@ -55,13 +55,13 @@ It is not appropriate for exploratory work, architectural decisions, or tasks wh
 
 ### Components
 
-**TaskSource** (protocol) — provides work items. Each source owns its polling state, its connection to the external system, and its reporting format. Implementing a new source means writing one class with four methods.
+**TaskSource** (protocol) - provides work items. Each source owns its polling state, its connection to the external system, and its reporting format. Implementing a new source means writing one class with four methods.
 
-**Task** — a normalized work item. Regardless of whether it came from Jira, GitHub, or a webhook, it has the same shape: id, source, title, description, metadata. The runner and agent prompt work against this one type.
+**Task** — a normalized work item. Regardless of origin, every task has the same shape: id, source, title, description, metadata. The runner and agent prompt work against this one type.
 
-**TaskRunner** — the orchestrator. Polls sources, dispatches tasks to agent harnesses, enforces concurrency and cost limits, and reports results back to sources. It is deliberately simple: no priority queues, no retry logic, no scheduling beyond a poll interval. Those are application-level concerns that can be built on top.
+**TaskRunner** - the orchestrator. Polls sources, dispatches tasks to agent harnesses, enforces concurrency and cost limits, and reports results back to sources. It is deliberately simple: no priority queues, no retry logic, no scheduling beyond a poll interval. Those are application-level concerns that can be built on top.
 
-**TaskResult** — the output of a completed task. Contains success/failure, PR URL (if created), human-readable findings, and usage data. The source implementation decides how to deliver this to the external system.
+**TaskResult** - the output of a completed task. Contains success/failure, PR URL (if created), human-readable findings, and usage data. The source implementation decides how to deliver this to the external system.
 
 ## Task lifecycle
 
@@ -85,7 +85,7 @@ It is not appropriate for exploratory work, architectural decisions, or tasks wh
         mark_completed()     mark_failed()
 ```
 
-The source implementation maps these transitions to the external system's workflow. For Jira, `mark_started()` might transition the ticket to "In Progress" and add a comment. For GitHub Issues, it might add a label and a comment.
+The source implementation maps these transitions to the external system's workflow. For example, an issue tracker source might transition the ticket and add a comment. A chat source might react with an emoji and reply in a thread.
 
 ## Isolation
 
@@ -93,7 +93,7 @@ Each task runs in its own `ExecutionEnv`. In autonomous mode, this is typically 
 
 1. A fresh container is created (or pulled from a warm pool) for the task
 2. The target repository is cloned into the container
-3. The agent runs inside the container — all file operations and shell commands are scoped to it
+3. The agent runs inside the container - all file operations and shell commands are scoped to it
 4. On completion (success or failure), the container is destroyed via `env.cleanup()`
 
 Tasks cannot interfere with each other or with the host. If the agent runs `rm -rf /`, it destroys the container, not the machine.
@@ -102,8 +102,8 @@ Tasks cannot interfere with each other or with the host. If the agent runs `rm -
 
 The runner enforces cost budgets at two levels:
 
-- **Per-task limit** (`cost_limit_per_task`) — if a single task's token usage exceeds the budget, the agent is aborted. The task is marked as failed with the reason.
-- **Concurrency limit** (`max_concurrent`) — at most N tasks run simultaneously. Additional tasks wait for a slot.
+- **Per-task limit** (`cost_limit_per_task`) - if a single task's token usage exceeds the budget, the agent is aborted. The task is marked as failed with the reason.
+- **Concurrency limit** (`max_concurrent`) - at most N tasks run simultaneously. Additional tasks wait for a slot.
 
 Cost tracking uses the `Usage` model from `tina-ai`, which includes token counts and dollar amounts per request.
 
@@ -127,28 +127,28 @@ Leave your findings as a comment on the original ticket.
 
 The exact prompt template is configurable. Skills loaded from `.md` files provide domain-specific instructions (e.g., "how to update a Maven dependency," "how to triage a PHP error").
 
-## Adding a new source
+## Implementing a source
 
 Implement the `TaskSource` protocol:
 
 ```python
-class SlackTaskSource:
-    source_name = "slack"
-    
+class MyTaskSource:
+    source_name = "my_source"
+
     async def poll(self) -> list[Task]:
-        # Read messages from a channel, return new tasks
+        # Check for new work items, return as normalized Tasks
         ...
-    
+
     async def mark_started(self, task: Task) -> None:
-        # React with 👀 emoji
+        # Signal that work has begun
         ...
-    
+
     async def mark_completed(self, task: Task, result: TaskResult) -> None:
-        # Reply in thread with findings and PR link
+        # Report success back to the source system
         ...
-    
+
     async def mark_failed(self, task: Task, error: str) -> None:
-        # Reply in thread with error
+        # Report failure back to the source system
         ...
 ```
 
@@ -156,7 +156,7 @@ Register it with the runner:
 
 ```python
 runner = TaskRunner(
-    sources=[JiraTaskSource(...), SlackTaskSource(...)],
+    sources=[MyTaskSource(...)],
     harness_factory=my_harness_factory,
 )
 await runner.run_forever()
@@ -171,9 +171,9 @@ No changes to the runner, agent, or tools.
 tina auto
 
 # Process a single task (for testing)
-tina auto --once VUL-123
+tina auto --once TASK-123
 
-# Dry run — show what would be processed without running agents
+# Dry run - show what would be processed without running agents
 tina auto --dry-run
 ```
 

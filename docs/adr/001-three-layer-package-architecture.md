@@ -19,7 +19,7 @@ The project is structured as three Python packages:
 
 - **`tina-ai`** — LLM abstraction layer. Defines `Protocol` and Pydantic model types for models, streaming, messages, usage tracking, and provider registration. Ships a default implementation wrapping Pydantic AI. Has no dependency on `tina-agent` or `tina`.
 - **`tina-agent`** — Agent runtime and harness. Defines the agent loop, tool protocol, `ExecutionEnv` protocol, event system, session persistence, and skill loading. Depends on `tina-ai` for model types. Has no dependency on `tina`.
-- **`tina`** — The product. CLI, coding tools, integration tools (Jira, GitHub), autonomous loop runner, and configuration. Depends on `tina-agent` and `tina-ai`.
+- **`tina`** — The product. CLI, coding tools, autonomous loop runner, and configuration. Depends on `tina-agent` and `tina-ai`.
 
 These are separate installable packages in a single monorepo managed by `uv` workspaces.
 

@@ -133,12 +133,10 @@ StreamEvent = Union[TextDelta, ToolCallStart, ToolCallDelta, ThinkingDelta, Stre
 
 | Type | Key fields | Description |
 |------|------------|-------------|
-| `TinaSettings` | `model`, `sandbox`, `skills`, `auto`, `jira`, `github`, `session_dir` | Root config (pydantic-settings) |
+| `TinaSettings` | `model`, `sandbox`, `skills`, `auto`, `session_dir` | Root config (pydantic-settings) |
 | `ModelSettings` | `provider`, `model_id`, `api_key`, `base_url` | Model selection |
 | `SandboxSettings` | `backend`, `docker_image`, `timeout` | Execution environment selection |
 | `AutoSettings` | `enabled`, `poll_interval`, `max_concurrent`, `cost_limit_per_task` | Autonomous loop settings |
-| `JiraSettings` | `base_url`, `username`, `api_token`, `jql_filter` | Jira connection |
-| `GitHubSettings` | `token`, `default_org` | GitHub connection |
 
 ### Autonomous loop
 

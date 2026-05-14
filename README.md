@@ -8,7 +8,7 @@
 
 This is the home of the Tina agent toolkit — a Python AI agent harness with batteries included and swappable components.
 
-* **[tina](packages/tina)**: CLI, coding tools, integrations, and autonomous loop
+* **[tina](packages/tina)**: CLI, coding tools, and autonomous loop
 * **[tina-agent](packages/tina-agent)**: Agent runtime with tool calling, events, sessions, and skills
 * **[tina-ai](packages/tina-ai)**: Typed multi-provider LLM API (Anthropic, OpenAI, Google, …)
 
@@ -18,7 +18,7 @@ This is the home of the Tina agent toolkit — a Python AI agent harness with ba
 |---------|-------------|
 | **[tina-ai](packages/tina-ai)** | LLM abstraction — models, streaming, provider protocol. Default wraps Pydantic AI. |
 | **[tina-agent](packages/tina-agent)** | Agent runtime — loop, tool protocol, ExecutionEnv, event bus, sessions, skills |
-| **[tina](packages/tina)** | Product — CLI, coding tools, Jira/GitHub integration, autonomous task loop |
+| **[tina](packages/tina)** | Product — CLI, coding tools, autonomous task loop |
 
 Dependencies flow strictly downward. `tina-ai` has no dependency on `tina-agent`. `tina-agent` has no dependency on `tina`. Each layer is independently useful.
 
@@ -28,7 +28,7 @@ Dependencies flow strictly downward. `tina-ai` has no dependency on `tina-agent`
 - **Swappable.** Model provider, execution environment, tool set, task source — change any piece without touching the rest.
 - **Sandboxed.** `ExecutionEnv` protocol abstracts file ops and shell. Local for dev, Docker for autonomous. Tools never call `subprocess` directly.
 - **Two-tier events.** Listeners observe (logging, metrics, UI). Hooks intercept (permission gates, context injection, tool overrides).
-- **Autonomous loop.** Poll Jira, GitHub Issues, or any `TaskSource` for work. Agent investigates, fixes, opens a PR. Human reviews at the end.
+- **Autonomous loop.** Implement the `TaskSource` protocol for your work system. Agent processes tasks headlessly. Human reviews at the end.
 - **Skills.** Load domain knowledge from `.md` files.
 
 ## Documentation

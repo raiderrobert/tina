@@ -2,7 +2,7 @@
 
 ## What Tina is
 
-Tina is a Python AI agent toolkit. It provides a typed agent runtime, an extensible tool system, and a set of default capabilities — coding tools, integration tools (Jira, GitHub), and an autonomous task loop. The toolkit is designed with swappable components: change the LLM provider, execution environment, tool set, or task source without touching the agent core.
+Tina is a Python AI agent toolkit. It provides a typed agent runtime, an extensible tool system, and a set of default capabilities — coding tools and an autonomous task loop. The toolkit is designed with swappable components: change the LLM provider, execution environment, tool set, or task source without touching the agent core.
 
 ## Three-layer package structure
 
@@ -56,7 +56,7 @@ Agent runtime and harness. Owns the agent loop — the cycle of prompting the mo
 - JSONL session storage
 - Skill loader with YAML frontmatter parsing
 
-**Does not know about:** specific tools (bash, file_read), specific integrations (Jira, GitHub), or the autonomous loop.
+**Does not know about:** specific tools (bash, file_read), specific integrations, or the autonomous loop.
 
 ### tina
 
@@ -64,11 +64,12 @@ The product. Opinionated defaults, specific tools, and the autonomous loop.
 
 **Ships:**
 - **Coding tools**: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` — each backed by `ExecutionEnv`
-- **Integration tools**: `jira_get_ticket`, `jira_add_comment`, `github_create_pr`, etc.
-- **Autonomous loop**: `TaskSource` protocol, `TaskRunner`, `JiraTaskSource`, `GitHubIssueSource`
+- **Autonomous loop**: `TaskSource` protocol and `TaskRunner`
 - **CLI**: `tina run` (interactive), `tina auto` (autonomous loop), `tina eval` (evaluation)
 - **Configuration**: `TinaSettings` via pydantic-settings (env vars, TOML, CLI flags)
 - **`DockerExecutionEnv`** — sandboxed execution for autonomous operation
+
+Integration tools and task source implementations are user-provided. The toolkit provides the protocols; you bring the integrations that fit your workflow.
 
 ## Agent loop
 
@@ -207,17 +208,11 @@ packages/
         │   ├── shell.py
         │   ├── grep.py
         │   ├── find.py
-        │   ├── ls.py
-        │   ├── jira.py
-        │   └── github.py
+        │   └── ls.py
         ├── auto/
         │   ├── __init__.py
         │   ├── source.py         # TaskSource protocol, Task, TaskResult
-        │   ├── runner.py         # TaskRunner
-        │   └── sources/
-        │       ├── __init__.py
-        │       ├── jira.py       # JiraTaskSource
-        │       └── github.py     # GitHubIssueSource
+        │   └── runner.py         # TaskRunner
         └── envs/
             ├── __init__.py
             └── docker.py         # DockerExecutionEnv
