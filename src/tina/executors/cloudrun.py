@@ -5,8 +5,10 @@ Requires the optional dependency: `pip install tina[cloudrun]`.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
+from tina.config import CloudRunOptions
 from tina.executors.base import ExecutorError
 from tina.log import get_logger
 
@@ -25,31 +27,15 @@ class CloudRunExecutor:
 
     def __init__(
         self,
-        project: str,
-        region: str,
-        job: str,
-        config_path: str = "tina.toml",
+        options: CloudRunOptions,
+        config_path: Path | str = "tina.toml",
         client: Any = None,
     ) -> None:
-        self.project = project
-        self.region = region
-        self.job = job
-        self.config_path = config_path
+        # Required keys are enforced by CloudRunOptions at config load, so a
+        # misconfigured job fails before the first query runs, not after.
+        self.options = options
+        self.config_path = str(config_path)
         self._client = client
-
-    @classmethod
-    def from_config(cls, options: dict[str, Any], config_path: str) -> CloudRunExecutor:
-        missing = [key for key in ("project", "region", "job") if not options.get(key)]
-        if missing:
-            raise ExecutorError(
-                "[executors.cloudrun] is missing required keys: " + ", ".join(missing)
-            )
-        return cls(
-            project=options["project"],
-            region=options["region"],
-            job=options["job"],
-            config_path=config_path,
-        )
 
     @property
     def client(self) -> Any:
@@ -59,7 +45,7 @@ class CloudRunExecutor:
 
     @property
     def job_path(self) -> str:
-        return f"projects/{self.project}/locations/{self.region}/jobs/{self.job}"
+        return self.options.job_path()
 
     def enqueue(self, workflow: str, item_id: str) -> None:
         run_v2 = _run_v2()

@@ -15,5 +15,5 @@ def build(config: Config) -> Executor:
     if config.executor == "local":
         return LocalExecutor(config_path=config.path)
     if config.executor == "cloudrun":
-        return CloudRunExecutor.from_config(config.executor_config(), str(config.path))
+        return CloudRunExecutor(config.cloudrun_options(), config.path)
     raise ExecutorError(f"unknown executor {config.executor!r}")

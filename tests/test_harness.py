@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from tina import harness
-from tina.config import HarnessConfig
+from tina.config import ArgvTemplate, HarnessConfig
 from tina.models import OutcomeStatus
 
 
@@ -19,17 +19,7 @@ def script(tmp_path: Path, body: str) -> Path:
 
 
 def config(*args: str) -> HarnessConfig:
-    return HarnessConfig(name="fake", command=list(args))
-
-
-def test_build_command_substitutes_both_tokens(tmp_path: Path) -> None:
-    command = harness.build_command(
-        config("agent", "--prompt", "{prompt_file}", "--out={outcome_dir}"),
-        tmp_path / "prompt.md",
-        tmp_path,
-    )
-
-    assert command == ["agent", "--prompt", str(tmp_path / "prompt.md"), f"--out={tmp_path}"]
+    return HarnessConfig(name="fake", command=ArgvTemplate(args=list(args)))
 
 
 def test_run_reads_the_outcome_the_agent_wrote(tmp_path: Path) -> None:
@@ -53,7 +43,7 @@ def test_run_reads_the_outcome_the_agent_wrote(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert result.report.outcome is OutcomeStatus.RESOLVED
-    assert result.report.artifacts[0].url == "https://example.test/pr/1"
+    assert str(result.report.artifacts[0].url) == "https://example.test/pr/1"
     assert (workdir / "prompt.md").read_text() == "do the thing"
 
 
@@ -71,7 +61,7 @@ def test_harness_stdout_is_never_parsed(tmp_path: Path) -> None:
 
 
 def test_missing_binary_is_reported_not_raised(tmp_path: Path) -> None:
-    result = harness.run(config("tina-no-such-binary"), "prompt", tmp_path / "run")
+    result = harness.run(config("tina-no-such-binary", "{prompt_file}"), "prompt", tmp_path / "run")
 
     assert result.report.outcome is OutcomeStatus.FAILED
     assert "could not start harness" in result.report.details
@@ -126,3 +116,16 @@ def test_default_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("TINA_HARNESS_TIMEOUT", "soon")
     assert harness.default_timeout() == harness.DEFAULT_TIMEOUT
+
+
+def test_a_bogus_artifact_url_is_a_broken_report(tmp_path: Path) -> None:
+    """`"url": "TBD"` is not an artifact that 404s — it is an invalid report."""
+    path = tmp_path / "outcome.json"
+    path.write_text(
+        json.dumps({"outcome": "resolved", "artifacts": [{"kind": "pr", "url": "TBD"}]})
+    )
+
+    report = harness.read_outcome(path, exit_code=0)
+
+    assert report.outcome is OutcomeStatus.FAILED
+    assert "invalid outcome.json" in report.details

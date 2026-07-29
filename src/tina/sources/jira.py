@@ -9,13 +9,58 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field, model_validator
 
 from tina.models import WorkItem
-from tina.sources.base import SourceError, require_env
+from tina.sources.base import SourceError, parse_payload, require_env
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
 FIELDS = ["summary", "description", "assignee", "status"]
+
+
+class SearchRequest(BaseModel):
+    """The JQL search body. Serialized with Jira's camelCase field names."""
+
+    jql: str
+    max_results: int = Field(default=100, serialization_alias="maxResults")
+    fields: list[str] = Field(default=FIELDS)
+
+
+class User(BaseModel):
+    """Only the one field claiming compares on."""
+
+    account_id: str | None = Field(default=None, alias="accountId")
+
+
+class IssueFields(BaseModel):
+    summary: str = ""
+    # Atlassian Document Format: a tree Tina flattens rather than models.
+    description: Any = None
+    assignee: User | None = None
+
+
+class Issue(BaseModel):
+    """A Jira issue, narrowed to what Tina reads. Unknown fields pass through."""
+
+    key: str = ""
+    id: str = ""
+    fields: IssueFields = Field(default_factory=IssueFields)
+    #: The payload this was validated from, kept for `WorkItem.raw`.
+    raw: dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_raw(cls, data: Any) -> Any:
+        return {**data, "raw": data} if isinstance(data, dict) else data
+
+    @property
+    def identifier(self) -> str:
+        return self.key or self.id
+
+
+class SearchResult(BaseModel):
+    issues: list[Issue] = Field(default_factory=list)
 
 
 class JiraSource:
@@ -44,19 +89,13 @@ class JiraSource:
         return self._bot_account_id
 
     def query(self, q: str) -> list[WorkItem]:
-        response = self._request(
-            "POST",
-            SEARCH_PATH,
-            json={"jql": q, "maxResults": 100, "fields": FIELDS},
-        )
-        issues = response.json().get("issues", [])
-        return [self._to_item(issue) for issue in issues]
+        request = SearchRequest(jql=q)
+        response = self._request("POST", SEARCH_PATH, json=request.model_dump(by_alias=True))
+        result = parse_payload(SearchResult, response, "jira", SEARCH_PATH)
+        return [self._to_item(issue) for issue in result.issues]
 
     def get(self, item_id: str) -> WorkItem:
-        response = self._request(
-            "GET", f"{ISSUE_PATH}/{item_id}", params={"fields": ",".join(FIELDS)}
-        )
-        return self._to_item(response.json())
+        return self._to_item(self._issue(item_id))
 
     def claim(self, item: WorkItem) -> bool:
         """Compare-and-set on the assignee field.
@@ -64,8 +103,7 @@ class JiraSource:
         Refuse if anyone already holds the issue, assign to the bot, then re-read
         to confirm the write landed and was not overwritten.
         """
-        current = self._raw_issue(item.id)
-        if (current.get("fields") or {}).get("assignee"):
+        if self._issue(item.id).fields.assignee is not None:
             return False
 
         self._request(
@@ -74,15 +112,13 @@ class JiraSource:
             json={"accountId": self.bot_account_id},
         )
 
-        confirmed = self._raw_issue(item.id)
-        assignee = (confirmed.get("fields") or {}).get("assignee") or {}
-        return assignee.get("accountId") == self.bot_account_id
+        assignee = self._issue(item.id).fields.assignee
+        return assignee is not None and assignee.account_id == self.bot_account_id
 
-    def _raw_issue(self, item_id: str) -> dict[str, Any]:
-        response = self._request(
-            "GET", f"{ISSUE_PATH}/{item_id}", params={"fields": ",".join(FIELDS)}
-        )
-        return response.json()
+    def _issue(self, item_id: str) -> Issue:
+        path = f"{ISSUE_PATH}/{item_id}"
+        response = self._request("GET", path, params={"fields": ",".join(FIELDS)})
+        return parse_payload(Issue, response, "jira", path)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         url = f"{self.base_url}{path}"
@@ -96,16 +132,15 @@ class JiraSource:
             )
         return response
 
-    def _to_item(self, issue: dict[str, Any]) -> WorkItem:
-        fields = issue.get("fields") or {}
-        key = issue.get("key") or str(issue.get("id", ""))
+    def _to_item(self, issue: Issue) -> WorkItem:
+        key = issue.identifier
         return WorkItem(
             id=key,
             source=self.name,
-            title=fields.get("summary") or "",
-            description=render_adf(fields.get("description")),
+            title=issue.fields.summary,
+            description=render_adf(issue.fields.description),
             url=f"{self.base_url}/browse/{key}",
-            raw=issue,
+            raw=issue.raw,
         )
 
 

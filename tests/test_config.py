@@ -31,7 +31,7 @@ def test_defaults(tmp_path: Path) -> None:
     assert cfg.activities_dir == Path("activities")
     assert cfg.workflow("vul").activity == "vul", "activity defaults to the table key"
     assert cfg.workflow("vul").result is None
-    assert cfg.harness_config().command[0] == "pi"
+    assert cfg.harness_config().command.args[0] == "pi"
 
 
 def test_explicit_values_and_activity_dir_resolves_against_config(tmp_path: Path) -> None:
@@ -115,7 +115,7 @@ def test_cloudrun_options_are_kept(tmp_path: Path) -> None:
     )
     cfg = config.load(write(tmp_path, text))
 
-    assert cfg.executor_config() == {"project": "p", "region": "r", "job": "j"}
+    assert cfg.cloudrun_options().job_path() == "projects/p/locations/r/jobs/j"
 
 
 def test_example_config_is_valid() -> None:
@@ -123,3 +123,52 @@ def test_example_config_is_valid() -> None:
 
     assert sorted(cfg.workflows) == ["bug", "vul"]
     assert cfg.workflow("bug").repo == "acme/api"
+
+
+def test_argv_template_renders_both_placeholders(tmp_path: Path) -> None:
+    template = config.ArgvTemplate(
+        args=["agent", "--prompt", "{prompt_file}", "--out={outcome_dir}"]
+    )
+
+    rendered = template.render(tmp_path / "prompt.md", tmp_path)
+
+    assert rendered == ["agent", "--prompt", str(tmp_path / "prompt.md"), f"--out={tmp_path}"]
+
+
+def test_a_typo_in_a_placeholder_is_not_passed_through(tmp_path: Path) -> None:
+    """Left unchecked this reaches the agent as a literal argument."""
+    text = MINIMAL.replace("{prompt_file}", "{prompt-file}")
+    with pytest.raises(config.ConfigError, match="unknown placeholder"):
+        config.load(write(tmp_path, text))
+
+
+def test_an_unknown_placeholder_names_what_is_supported(tmp_path: Path) -> None:
+    text = MINIMAL.replace("{prompt_file}", "{workdir}")
+    with pytest.raises(config.ConfigError, match=r"\{outcome_dir\}, \{prompt_file\}"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_command_without_the_prompt_is_rejected(tmp_path: Path) -> None:
+    """An agent invoked without the prompt file was never given the work."""
+    text = MINIMAL.replace('"--prompt-file", "{prompt_file}"', '"--resume"')
+    with pytest.raises(config.ConfigError, match="prompt_file"):
+        config.load(write(tmp_path, text))
+
+
+def test_an_empty_command_is_rejected(tmp_path: Path) -> None:
+    text = MINIMAL.replace('command = ["pi", "--prompt-file", "{prompt_file}"]', "command = []")
+    with pytest.raises(config.ConfigError, match="command"):
+        config.load(write(tmp_path, text))
+
+
+def test_partial_cloudrun_options_fail_at_load(tmp_path: Path) -> None:
+    """Not at dispatch time, when a scheduler is already depending on it."""
+    text = MINIMAL + '\n[executors.cloudrun]\nproject = "p"\nregion = "r"\n'
+    with pytest.raises(config.ConfigError, match="executors.cloudrun.job"):
+        config.load(write(tmp_path, text))
+
+
+def test_an_unknown_executor_table_is_rejected(tmp_path: Path) -> None:
+    text = MINIMAL + '\n[executors.nomad]\ndatacenter = "dc1"\n'
+    with pytest.raises(config.ConfigError, match="nomad"):
+        config.load(write(tmp_path, text))

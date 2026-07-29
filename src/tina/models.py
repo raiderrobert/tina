@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field
 
 
 class WorkItem(BaseModel):
@@ -15,7 +15,11 @@ class WorkItem(BaseModel):
     source: str
     title: str = ""
     description: str = ""
-    url: str = ""
+    # None rather than "" — a tracker that returned no link has no link, and an
+    # empty string is not a URL.
+    url: AnyHttpUrl | None = None
+    # The untouched tracker payload, so an activity can reach fields Tina does
+    # not model. Deliberately unvalidated: this is the escape hatch.
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -29,10 +33,15 @@ class OutcomeStatus(StrEnum):
 
 
 class Artifact(BaseModel):
-    """Something the agent claims to have produced, in some other system."""
+    """Something the agent claims to have produced, in some other system.
+
+    The URL is validated when outcome.json is parsed, not when verification
+    fetches it: an agent that writes `"url": "TBD"` has written a broken report,
+    and that is a `failed` run rather than an artifact that merely 404s.
+    """
 
     kind: str
-    url: str
+    url: AnyHttpUrl
 
 
 class OutcomeReport(BaseModel):

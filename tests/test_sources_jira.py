@@ -53,7 +53,7 @@ def test_query_returns_normalized_items() -> None:
     assert [item.id for item in items] == ["VUL-1", "VUL-2"]
     assert items[0].title == "CVE-2024-0001 in libfoo"
     assert items[0].description.strip() == "Bump libfoo."
-    assert items[0].url == f"{BASE}/browse/VUL-1"
+    assert str(items[0].url) == f"{BASE}/browse/VUL-1"
     assert items[0].raw["key"] == "VUL-1"
 
 
@@ -136,3 +136,34 @@ def test_missing_env_is_named() -> None:
 )
 def test_render_adf(document: Any, expected: str) -> None:
     assert render_adf(document) == expected
+
+
+def test_a_response_of_the_wrong_shape_is_a_source_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"issues": "not a list"})
+
+    with pytest.raises(SourceError, match="unexpected response"):
+        source(handler).query("project = VUL")
+
+
+def test_non_json_is_a_source_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>maintenance</html>")
+
+    with pytest.raises(SourceError, match="unexpected response"):
+        source(handler).get("VUL-1")
+
+
+def test_unknown_fields_are_tolerated() -> None:
+    """Trackers grow fields; that is not a reason to stop working."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = issue()
+        payload["fields"]["someNewField"] = {"anything": True}
+        payload["expand"] = "renderedFields"
+        return httpx.Response(200, json=payload)
+
+    item = source(handler).get("VUL-1")
+
+    assert item.id == "VUL-1"
+    assert item.raw["fields"]["someNewField"] == {"anything": True}, "raw keeps everything"

@@ -37,7 +37,7 @@ def verify(report: OutcomeReport, client: httpx.Client | None = None) -> Outcome
     owned = client is None
     client = client or httpx.Client(timeout=TIMEOUT, follow_redirects=False)
     try:
-        report.verified = all(_exists(client, artifact.url) for artifact in report.artifacts)
+        report.verified = all(_exists(client, str(artifact.url)) for artifact in report.artifacts)
     finally:
         if owned:
             client.close()

@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from typing import Protocol, runtime_checkable
 
+import httpx
+from pydantic import BaseModel, ValidationError
+
 from tina.errors import TinaError
 from tina.models import WorkItem
 
@@ -44,3 +47,19 @@ def require_env(name: str, source: str) -> str:
     if not value:
         raise SourceError(f"{source} source requires the {name} environment variable")
     return value
+
+
+def parse_payload[M: BaseModel](
+    model: type[M], response: httpx.Response, source: str, path: str
+) -> M:
+    """Validate a tracker response against the shape Tina expects.
+
+    The models only declare the fields Tina reads and tolerate unknown ones, so
+    this fires when a tracker returns something genuinely different — not every
+    time an API grows a field.
+    """
+    try:
+        return model.model_validate(response.json())
+    except ValueError as exc:
+        detail = exc if isinstance(exc, ValidationError) else f"response was not JSON: {exc}"
+        raise SourceError(f"{source}: unexpected response from {path}: {detail}") from None

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from tina import executors
-from tina.config import Config
+from tina.config import CloudRunOptions, Config, ConfigError
 from tina.executors.base import ExecutorError
 from tina.executors.cloudrun import CloudRunExecutor
 from tina.executors.local import LocalExecutor
@@ -51,14 +51,16 @@ def test_local_executor_reports_a_failure_to_start(monkeypatch: pytest.MonkeyPat
         LocalExecutor(config_path=Path("tina.toml")).enqueue("vul", "VUL-1")
 
 
-def test_cloudrun_requires_its_config() -> None:
-    with pytest.raises(ExecutorError, match="project, region, job"):
-        CloudRunExecutor.from_config({}, "tina.toml")
+def test_cloudrun_requires_its_options_table(tmp_path: Path) -> None:
+    config = Config(path=tmp_path / "tina.toml", harness="pi", executor="cloudrun")
+
+    with pytest.raises(ConfigError, match=r"\[executors.cloudrun\] table"):
+        executors.build(config)
 
 
 def test_cloudrun_job_path() -> None:
-    executor = CloudRunExecutor.from_config(
-        {"project": "p", "region": "us-central1", "job": "tina-worker"}, "tina.toml"
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="us-central1", job="tina-worker")
     )
 
     assert executor.job_path == "projects/p/locations/us-central1/jobs/tina-worker"

@@ -50,20 +50,6 @@ def default_timeout() -> float:
         return DEFAULT_TIMEOUT
 
 
-def build_command(config: HarnessConfig, prompt_file: Path, workdir: Path) -> list[str]:
-    """Substitute the run-specific paths into the configured argv template."""
-    substitutions = {
-        "{prompt_file}": str(prompt_file),
-        "{outcome_dir}": str(workdir),
-    }
-    command = []
-    for arg in config.command:
-        for token, value in substitutions.items():
-            arg = arg.replace(token, value)
-        command.append(arg)
-    return command
-
-
 def run(
     config: HarnessConfig,
     prompt: str,
@@ -75,7 +61,7 @@ def run(
     prompt_file = workdir / PROMPT_FILE
     prompt_file.write_text(prompt, encoding="utf-8")
 
-    command = build_command(config, prompt_file, workdir)
+    command = config.command.render(prompt_file, workdir)
     log.info("harness starting", extra={"harness": config.name, "command": command})
 
     try:

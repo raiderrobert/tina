@@ -49,7 +49,7 @@ def test_query_returns_normalized_items() -> None:
     assert seen["path"] == "/search/issues"
     assert seen["q"] == "repo:acme/api is:open"
     assert [i.id for i in items] == ["42", "43"]
-    assert items[0].url == f"https://github.com/{REPO}/issues/42"
+    assert str(items[0].url) == f"https://github.com/{REPO}/issues/42"
     assert items[0].description == "stack trace follows"
 
 
@@ -124,3 +124,22 @@ def test_http_error_is_a_source_error(item: WorkItem) -> None:
 
     with pytest.raises(SourceError, match="404"):
         source(handler).get("42")
+
+
+def test_an_issue_without_a_number_is_a_source_error() -> None:
+    """Nothing can be claimed or linked without one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"title": "no number here"})
+
+    with pytest.raises(SourceError, match="unexpected response"):
+        source(handler).get("42")
+
+
+def test_a_missing_html_url_becomes_none_not_empty_string() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = issue()
+        del payload["html_url"]
+        return httpx.Response(200, json=payload)
+
+    assert source(handler).get("42").url is None
