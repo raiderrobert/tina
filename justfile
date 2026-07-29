@@ -33,6 +33,10 @@ types:
 test *args:
     uv run pytest {{ args }}
 
+# Run tests with coverage
+coverage *args:
+    uv run pytest --cov=tina --cov-report=term-missing {{ args }}
+
 # Auto-fix formatting and lint
 fmt:
     uv run ruff format

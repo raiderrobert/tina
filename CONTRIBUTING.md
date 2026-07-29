@@ -43,6 +43,7 @@ Run `just check` before every commit. It is the gate CI runs —
 just fmt            # auto-fix: ruff format, then ruff check --fix
 just test -k jira   # arguments pass through to pytest
 just test -x
+just coverage       # test run with a coverage report
 ```
 
 Also `just build` (`uv build`) and `just clean` (remove build artifacts and
