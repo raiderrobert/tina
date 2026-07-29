@@ -152,6 +152,11 @@ def last_record(output: str) -> dict[str, Any]:
     return json.loads(lines[-1])
 
 
+def json_lines(output: str) -> list[dict[str, Any]]:
+    """Every JSON log line, in order. stdout is one object per line."""
+    return [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+
+
 def items(*ids: str) -> list[WorkItem]:
     return [WorkItem(id=item_id, source="jira", title=item_id) for item_id in ids]
 
@@ -354,6 +359,166 @@ def test_dispatch_with_no_matches_enqueues_nothing(project: Path) -> None:
     cli.dispatch_workflow(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
 
     assert executor.enqueued == []
+
+
+# --- dry run: everything a dispatch does except the last step ---------------
+
+
+def test_a_dry_run_enqueues_nothing(project: Path, wired: tuple[FakeSource, FakeExecutor]) -> None:
+    """The query ran; the enqueue did not. Driven through the real argv path."""
+    source, executor = wired
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--workflow", "vul", "--config", str(project), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert source.queried == "project = VUL"
+    assert executor.enqueued == []
+    assert source.claimed == [], "the dispatcher never claims — workers do"
+
+
+def test_a_dry_run_builds_no_executor(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No LocalExecutor subprocess, no Cloud Run client — nothing constructed at all.
+
+    Asserted with a spy rather than by reading the code: `build()` is where every
+    executor side effect begins, so a build that never happens is the guarantee.
+    """
+
+    def fail(cfg: config.Config) -> executors.Executor:
+        raise AssertionError("executors.build must not be called for a dry run")
+
+    monkeypatch.setattr(executors, "build", fail)
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--workflow", "vul", "--config", str(project), "--dry-run"]
+    )
+
+    assert result.exception is None
+    assert result.exit_code == 0
+
+
+def test_a_dry_run_respects_the_limit(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """--limit 2 against three items previews two."""
+    result = runner.invoke(
+        cli.app,
+        ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
+    )
+
+    previewed = [
+        line["item"] for line in json_lines(result.stdout) if line["message"] == "would enqueue"
+    ]
+    assert result.exit_code == 0
+    assert previewed == ["VUL-1", "VUL-2"]
+
+
+def test_a_dry_run_with_no_matches_exits_zero(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero matches is a valid preview, not an error."""
+    source, executor = FakeSource([]), FakeExecutor()
+    monkeypatch.setattr(sources, "build", lambda workflow, client=None: source)
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(
+        cli.app,
+        ["dispatch", "--workflow", "vul", "--limit", "5", "--config", str(project), "--dry-run"],
+    )
+
+    lines = json_lines(result.stdout)
+    assert result.exit_code == 0
+    assert executor.enqueued == []
+    assert [line["message"] for line in lines] == ["dispatching"]
+    assert lines[0]["matched"] == 0
+    assert lines[0]["dry_run"] is True
+    assert "0 items matched (limit 5)." in plain(result.stderr)
+
+
+def test_the_would_enqueue_line_keeps_the_enqueued_schema(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Same fields as `enqueued`, plus the marker; a different message on purpose."""
+    argv = ["dispatch", "--workflow", "vul", "--config", str(project)]
+    real = json_lines(runner.invoke(cli.app, argv).stdout)
+    preview = json_lines(runner.invoke(cli.app, [*argv, "--dry-run"]).stdout)
+
+    enqueued = next(line for line in real if line["message"] == "enqueued")
+    would = next(line for line in preview if line["message"] == "would enqueue")
+
+    assert set(would) - set(enqueued) == {"dry_run"}
+    assert set(enqueued) - set(would) == set()
+    assert set(enqueued) == {
+        "ts",
+        "level",
+        "logger",
+        "message",
+        "workflow",
+        "item",
+        "url",
+        "executor",
+    }
+    assert would["dry_run"] is True
+    assert (would["item"], would["url"], would["executor"]) == (
+        enqueued["item"],
+        enqueued["url"],
+        enqueued["executor"],
+    )
+
+
+def test_a_normal_dispatch_emits_no_dry_run_key(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The marker is present only when the flag is."""
+    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert all("dry_run" not in line for line in json_lines(result.stdout))
+    assert result.stderr == "", "a normal dispatch prints nothing new on stderr"
+
+
+def test_the_dry_run_preview_lands_on_stderr(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Header, one line per match in order, tally, footer — and none of it on stdout."""
+    result = runner.invoke(
+        cli.app,
+        ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
+    )
+
+    assert result.exit_code == 0
+    assert plain(result.stderr).splitlines() == [
+        "Dry run — no workers will be enqueued",
+        "",
+        "  Would enqueue VUL-1 via local — VUL-1",
+        "  Would enqueue VUL-2 via local — VUL-2",
+        "",
+        "2 items matched (limit 2).",
+        "",
+        "Run without --dry-run to enqueue.",
+    ]
+    assert "Would enqueue" not in result.stdout, "the preview is prose; stdout stays JSON"
+
+
+def test_a_dry_run_drops_an_empty_title(project: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """No title, no dangling dash."""
+    source = FakeSource([WorkItem(id="VUL-9", source="jira")])
+
+    cli.dispatch_workflow(config.load(project), "vul", 1, source=source, dry_run=True)
+
+    err = plain(capsys.readouterr().err)
+    assert "  Would enqueue VUL-9 via local\n" in err
+    assert "VUL-9 via local —" not in err
+
+
+def test_dispatch_help_lists_the_dry_run_flag() -> None:
+    result = runner.invoke(cli.app, ["dispatch", "--help"])
+
+    assert result.exit_code == 0
+    assert "--dry-run" in plain(result.output)
 
 
 def test_run_invokes_the_agent_and_records_the_outcome(project: Path, records: io.StringIO) -> None:

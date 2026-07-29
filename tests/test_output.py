@@ -72,3 +72,44 @@ def test_a_bare_tina_error_renders_a_single_line(capsys: pytest.CaptureFixture[s
 
     err = plain(capsys.readouterr().err)
     assert err.splitlines() == ["✗ boom"]
+
+
+def test_a_dry_run_preview_renders_header_lines_summary_and_footer(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output.dry_run_header()
+    output.would("Would enqueue VUL-1 via local — CVE-2024-0001 in libfoo")
+    output.would("Would enqueue VUL-2 via local — Bump libbar to 2.0.1")
+    output.dry_run_footer("2 items matched (limit 5).")
+
+    assert plain(capsys.readouterr().err).splitlines() == [
+        "Dry run — no workers will be enqueued",
+        "",
+        "  Would enqueue VUL-1 via local — CVE-2024-0001 in libfoo",
+        "  Would enqueue VUL-2 via local — Bump libbar to 2.0.1",
+        "",
+        "2 items matched (limit 5).",
+        "",
+        "Run without --dry-run to enqueue.",
+    ]
+
+
+def test_the_dry_run_footer_omits_an_empty_summary(capsys: pytest.CaptureFixture[str]) -> None:
+    """No tally rather than a blank one, the same way `error()` drops an empty Cause."""
+    output.dry_run_footer()
+
+    assert plain(capsys.readouterr().err).splitlines() == [
+        "",
+        "Run without --dry-run to enqueue.",
+    ]
+
+
+def test_the_dry_run_preview_goes_to_stderr_only(capsys: pytest.CaptureFixture[str]) -> None:
+    """stdout stays machine-readable: this module writes to stderr only."""
+    output.dry_run_header()
+    output.would("Would enqueue VUL-1 via local")
+    output.dry_run_footer("1 items matched (limit 1).")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err != ""

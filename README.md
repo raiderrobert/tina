@@ -34,8 +34,9 @@ result = "github:issue-comment"
 Two commands, one image:
 
 ```bash
-tina dispatch --workflow bug --limit 5   # query, take N, enqueue N workers
-tina run --workflow bug --item 4821      # claim, run the agent, record outcome
+tina dispatch --workflow bug --limit 5             # query, take N, enqueue N workers
+tina dispatch --workflow bug --limit 5 --dry-run   # preview the matches, enqueue nothing
+tina run --workflow bug --item 4821                # claim, run the agent, record outcome
 ```
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud

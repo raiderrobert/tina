@@ -18,11 +18,11 @@ from typing import Annotated
 import typer
 
 from tina import executors, harness, log, output, prompt, sources, verify
-from tina.config import Config
+from tina.config import Config, WorkflowConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
 from tina.executors.base import Executor
-from tina.models import OutcomeReport, OutcomeStatus, RunRecord
+from tina.models import OutcomeReport, OutcomeStatus, RunRecord, WorkItem
 from tina.sources.base import Source
 
 DEFAULT_CONFIG = Path("tina.toml")
@@ -73,10 +73,14 @@ def dispatch(
         int, typer.Option("--limit", help="Maximum number of workers to enqueue.")
     ] = 1,
     config: ConfigOption = DEFAULT_CONFIG,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview the matched items without enqueueing anything."),
+    ] = False,
 ) -> None:
     """Run the source query and enqueue up to --limit workers."""
     with _exit_on_tina_error("dispatch"):
-        dispatch_workflow(load_config(config), workflow, limit)
+        dispatch_workflow(load_config(config), workflow, limit, dry_run=dry_run)
 
 
 @app.command()
@@ -115,16 +119,28 @@ def dispatch_workflow(
     limit: int,
     source: Source | None = None,
     executor: Executor | None = None,
+    dry_run: bool = False,
 ) -> None:
     """Query, take up to `limit` items, enqueue one worker each.
 
     The dispatcher never runs an agent and never claims — workers claim, so a
     dispatcher that dies mid-loop leaves nothing stuck.
+
+    `dry_run` moves the boundary to the last step only: the real source is built
+    and the real query runs against the live tracker, but no executor is ever
+    constructed. That a preview enqueues nothing follows from the absence of an
+    executor, not from a branch inside the loop that nobody took. The one thing
+    it therefore cannot report is a `cloudrun` executor with no
+    `[executors.cloudrun]` table — a table that is present but incomplete still
+    fails at config load, whichever mode this runs in.
     """
     workflow = config.workflow(workflow_name)
     source = source or sources.build(workflow)
-    executor = executor or executors.build(config)
+    if dry_run:
+        _preview(config, workflow, source.query(workflow.query)[: max(limit, 0)], limit)
+        return
 
+    executor = executor or executors.build(config)
     items = source.query(workflow.query)[: max(limit, 0)]
     logger.info(
         "dispatching",
@@ -132,15 +148,43 @@ def dispatch_workflow(
     )
     for item in items:
         executor.enqueue(workflow.name, item.id)
+        logger.info("enqueued", extra=_item_fields(workflow.name, item, config.executor))
+
+
+def _item_fields(workflow: str, item: WorkItem, executor: str) -> dict[str, str]:
+    """The per-item stdout schema, shared by `enqueued` and `would enqueue`.
+
+    One function so the two lines cannot drift: anything parsing the log by
+    field keeps working across both modes.
+    """
+    return {
+        "workflow": workflow,
+        "item": item.id,
+        "url": str(item.url or ""),
+        "executor": executor,
+    }
+
+
+def _preview(config: Config, workflow: WorkflowConfig, items: list[WorkItem], limit: int) -> None:
+    """The dry-run half: same query, same fields, no executor and no enqueue.
+
+    The message is `would enqueue`, never `enqueued`, so a collector filtering
+    on `message` can never count a preview as a real dispatch. The `dry_run`
+    marker is added only here, so a normal dispatch carries no such key at all.
+    """
+    logger.info(
+        "dispatching",
+        extra={"workflow": workflow.name, "limit": limit, "matched": len(items), "dry_run": True},
+    )
+    output.dry_run_header()
+    for item in items:
+        line = f"Would enqueue {item.id} via {config.executor}"
+        output.would(f"{line} — {item.title}" if item.title else line)
         logger.info(
-            "enqueued",
-            extra={
-                "workflow": workflow.name,
-                "item": item.id,
-                "url": str(item.url or ""),
-                "executor": config.executor,
-            },
+            "would enqueue",
+            extra=_item_fields(workflow.name, item, config.executor) | {"dry_run": True},
         )
+    output.dry_run_footer(f"{len(items)} items matched (limit {limit}).")
 
 
 def run_item(
