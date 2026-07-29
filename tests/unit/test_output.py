@@ -143,3 +143,19 @@ def test_the_dry_run_frame_defaults_to_the_dispatch_text(
         "",
         "Run without --dry-run to enqueue.",
     ]
+
+
+def test_the_status_block_renders_a_heading_and_its_tallies(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Styling is decorative — the block reads the same with ANSI stripped."""
+    output.counts("Track bug", {"unclaimed": 12, "in flight": 3})
+
+    captured = capsys.readouterr()
+    assert plain(captured.err).splitlines() == [
+        "Track bug",
+        "",
+        "  unclaimed: 12",
+        "  in flight: 3",
+    ]
+    assert captured.out == "", "stdout stays machine-readable"

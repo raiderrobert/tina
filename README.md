@@ -33,14 +33,19 @@ track = "triage"
 result = "github:issue-comment"
 ```
 
-Two commands, one image:
+Three commands, one image:
 
 ```bash
 tina dispatch --track bug --limit 5             # query, take N, enqueue N workers
 tina dispatch --track bug --limit 5 --dry-run   # preview the matches, enqueue nothing
 tina run --track bug --item 4821                # claim, run the agent, record outcome
 tina run --track bug --item 4821 --dry-run      # preview: prompt and command, no claim
+tina status --track bug                         # counts: waiting for a worker, held by one
 ```
+
+`status` derives both counts from the track's own `query` — once as `dispatch` runs
+it, and once with its `no:assignee` clause swapped for the bot — so they are two
+halves of one question and Tina keeps no state to go stale.
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud
 Scheduler, EventBridge, k8s CronJob, systemd timers, and GitHub Actions all work

@@ -7,7 +7,7 @@ import pytest
 
 from tina.models import WorkItem
 from tina.sources.base import SourceError
-from tina.sources.github import GitHubSource
+from tina.sources.github import NO_ASSIGNEE, GitHubSource
 
 REPO = "acme/api"
 BOT = "acme-tina[bot]"
@@ -165,3 +165,63 @@ def test_a_missing_html_url_becomes_none_not_empty_string() -> None:
         return httpx.Response(200, json=payload)
 
     assert source(handler).get("42").url is None
+
+
+def test_claimed_swaps_the_no_assignee_qualifier_in_place() -> None:
+    """Other qualifiers unmoved — including a label that merely contains the text."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.params["q"])
+        return httpx.Response(200, json={"items": [issue(), issue(43)]})
+
+    cases = [
+        # the README's example query
+        (
+            "repo:acme/api is:issue is:open no:assignee label:bug",
+            f"repo:acme/api is:issue is:open assignee:{BOT} label:bug",
+        ),
+        # a label whose value is the qualifier's own text is a different token
+        (
+            'repo:acme/api no:assignee label:"no:assignee"',
+            f'repo:acme/api assignee:{BOT} label:"no:assignee"',
+        ),
+        ("no:assignee", f"assignee:{BOT}"),
+        ("repo:acme/api NO:ASSIGNEE is:open", f"repo:acme/api assignee:{BOT} is:open"),
+    ]
+    items_returned = [source(handler).claimed(q) for q, _ in cases]
+
+    assert sent == [expected for _, expected in cases]
+    assert [i.id for i in items_returned[0]] == ["42", "43"]
+    assert str(items_returned[0][0].url) == f"https://github.com/{REPO}/issues/42"
+
+
+def test_claimed_issues_gets_only() -> None:
+    """Search is a read. Any other method here would break the read-only contract."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        assert request.method == "GET", "claimed() must never write"
+        return httpx.Response(200, json={"items": [issue()]})
+
+    source(handler).claimed("repo:acme/api is:open no:assignee")
+
+    assert calls == [("GET", "/search/issues")]
+
+
+def test_a_query_with_no_no_assignee_qualifier_is_a_source_error() -> None:
+    """A literal containing the text is not the qualifier, and neither is a negated one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the query is rejected before any request is made")
+
+    for q in (
+        "repo:acme/api is:open label:bug",
+        'repo:acme/api is:open label:"no:assignee"',
+        "repo:acme/api is:open -no:assignee",
+    ):
+        with pytest.raises(SourceError) as caught:
+            source(handler).claimed(q)
+        assert q in str(caught.value)
+        assert NO_ASSIGNEE in caught.value.fix

@@ -1,9 +1,9 @@
-"""`tina dispatch` and `tina run`. Two roles, one image.
+"""`tina dispatch`, `tina run`, and `tina status`. Two roles, one image.
 
 The typer commands are a thin shell: they parse argv, load config, and turn a
-`TinaError` into exit 1. The orchestration lives in `dispatch_track` and
-`run_item`, which take already-built objects so callers (and tests) can inject
-a source or executor.
+`TinaError` into exit 1. The orchestration lives in `dispatch_track`,
+`run_item`, and `status_track`, which take already-built objects so callers
+(and tests) can inject a source or executor.
 """
 
 from __future__ import annotations
@@ -102,6 +102,16 @@ def run(
         run_item(load_config(config), track, item, dry_run=dry_run)
 
 
+@app.command()
+def status(
+    track: TrackOption,
+    config: ConfigOption = DEFAULT_CONFIG,
+) -> None:
+    """Report how many items are waiting and how many workers hold."""
+    with _exit_on_tina_error("status"):
+        status_track(load_config(config), track)
+
+
 @contextmanager
 def _exit_on_tina_error(command: str) -> Iterator[None]:
     """Exit 1 for Tina's own failures — and only those.
@@ -193,6 +203,27 @@ def _preview(config: Config, track: TrackConfig, items: list[WorkItem], limit: i
             extra=_item_fields(track.name, item, config.executor) | {"dry_run": True},
         )
     output.dry_run_footer(f"{len(items)} items matched (limit {limit}).")
+
+
+def status_track(config: Config, track_name: str, source: Source | None = None) -> None:
+    """Two counts off two tracker queries. Reads no local state and writes nothing.
+
+    The counts are two halves of one question: the same configured query, once
+    as `dispatch` runs it and once with its unclaimed clause inverted by the
+    adapter. Nothing is claimed and no executor is ever constructed — which is
+    the guarantee, since there is no call here that could do either.
+    """
+    track = config.track(track_name)
+    source = source or sources.build(track)
+
+    unclaimed = len(source.query(track.query))
+    in_flight = len(source.claimed(track.query))
+
+    logger.info(
+        "status",
+        extra={"track": track.name, "matched": unclaimed, "in_flight": in_flight},
+    )
+    output.counts(f"Track {track.name}", {"unclaimed": unclaimed, "in flight": in_flight})
 
 
 def run_item(

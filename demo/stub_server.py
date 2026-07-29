@@ -4,7 +4,7 @@
 demo against a live repo would mutate it. The demo points `GITHUB_API_URL` at
 this server instead and serves the four endpoints the run touches:
 
-    GET  /search/issues                         -- the dispatch query
+    GET  /search/issues                         -- the dispatch query, filtered by assignee
     GET  /repos/{owner}/{name}/issues/{n}       -- fetch, and the claim re-read
     POST /repos/{owner}/{name}/issues/{n}/assignees
     GET  /{owner}/{name}/pull/{n}               -- the artifact tina verifies
@@ -22,6 +22,7 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 REPO = "acme/api"
 
@@ -51,6 +52,22 @@ def issue_payload(base_url: str, number: int) -> dict[str, Any]:
     }
 
 
+def matches(q: str, number: int) -> bool:
+    """The two assignee filters the demo's queries use; other qualifiers always match.
+
+    `tina dispatch` sends `no:assignee` and `tina status` sends
+    `assignee:<login>` for the same track, so a stub that ignored `q` would
+    answer both with the same list and make the two counts meaningless.
+    """
+    holders = assigned.get(number, [])
+    for token in q.split():
+        if token == "no:assignee" and holders:
+            return False
+        if token.startswith("assignee:") and token.removeprefix("assignee:") not in holders:
+            return False
+    return True
+
+
 class Handler(BaseHTTPRequestHandler):
     """Routes the demo's requests; everything else is a 404."""
 
@@ -62,7 +79,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 -- the BaseHTTPRequestHandler contract
         path = self.path.split("?", 1)[0]
         if path == "/search/issues":
-            items = [issue_payload(self.base_url, number) for number in ISSUES]
+            q = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            items = [
+                issue_payload(self.base_url, number) for number in ISSUES if matches(q, number)
+            ]
             self.respond(200, {"total_count": len(items), "items": items})
             return
         match = ISSUE.match(path)

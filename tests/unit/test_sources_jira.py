@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -7,7 +8,7 @@ import pytest
 
 from tina.models import WorkItem
 from tina.sources.base import SourceError
-from tina.sources.jira import JiraSource, render_adf
+from tina.sources.jira import SEARCH_PATH, JiraSource, render_adf
 
 BASE = "https://acme.atlassian.net"
 BOT = "bot-account-id"
@@ -189,3 +190,68 @@ def test_unknown_fields_are_tolerated() -> None:
 
     assert item.id == "VUL-1"
     assert item.raw["fields"]["someNewField"] == {"anything": True}, "raw keeps everything"
+
+
+def test_claimed_swaps_the_empty_assignee_clause() -> None:
+    """Every spelling of emptiness, with the rest of the query preserved."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["jql"])
+        return httpx.Response(200, json={"issues": [issue(), issue("VUL-2")]})
+
+    cases = [
+        # the architecture doc's example: the other clauses survive untouched
+        (
+            "project = VUL AND status = Open AND assignee IS EMPTY",
+            f'project = VUL AND status = Open AND assignee = "{BOT}"',
+        ),
+        # mid-query, and lowercase
+        (
+            "project = VUL AND assignee is empty AND status = Open",
+            f'project = VUL AND assignee = "{BOT}" AND status = Open',
+        ),
+        ("assignee IS EMPTY", f'assignee = "{BOT}"'),
+        ("assignee IS NULL", f'assignee = "{BOT}"'),
+        ("assignee = EMPTY", f'assignee = "{BOT}"'),
+        ("assignee=NULL", f'assignee = "{BOT}"'),
+        ("ASSIGNEE   IS    EMPTY", f'assignee = "{BOT}"'),
+    ]
+    items_returned = [source(handler).claimed(jql) for jql, _ in cases]
+
+    assert sent == [expected for _, expected in cases]
+    assert [item.id for item in items_returned[0]] == ["VUL-1", "VUL-2"]
+    assert items_returned[0][0].title == "CVE-2024-0001 in libfoo"
+    assert str(items_returned[0][0].url) == f"{BASE}/browse/VUL-1"
+
+
+def test_claimed_issues_no_write() -> None:
+    """One search, and nothing else. A write here would break the read-only contract."""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        assert request.method == "POST", "claimed() must never write"
+        assert request.url.path == SEARCH_PATH, "the only POST it makes is the search"
+        return httpx.Response(200, json={"issues": [issue()]})
+
+    source(handler).claimed("project = VUL AND assignee IS EMPTY")
+
+    assert calls == [("POST", SEARCH_PATH)]
+
+
+def test_a_query_with_no_empty_assignee_clause_is_a_source_error() -> None:
+    """`IS NOT EMPTY` means the opposite, so it is not a match — loud beats a silent 0."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the query is rejected before any request is made")
+
+    for jql in (
+        "project = VUL",
+        "project = VUL AND assignee IS NOT EMPTY",
+        "project = VUL AND assignee != EMPTY",
+    ):
+        with pytest.raises(SourceError) as caught:
+            source(handler).claimed(jql)
+        assert jql in str(caught.value)
+        assert "assignee IS EMPTY" in caught.value.fix

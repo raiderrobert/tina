@@ -21,6 +21,9 @@ API_BASE = "https://api.github.com"
 SEARCH_PATH = "/search/issues"
 ACCEPT = "application/vnd.github+json"
 
+#: The qualifier a track query uses to exclude claimed issues.
+NO_ASSIGNEE = "no:assignee"
+
 
 class SearchParams(BaseModel):
     """Query string for the issues search API."""
@@ -136,6 +139,14 @@ class GitHubSource:
             return ClaimPrognosis(would_claim=True, holder=self.bot_login)
         return ClaimPrognosis(would_claim=False, holder=", ".join(logins))
 
+    def claimed(self, q: str) -> list[WorkItem]:
+        """The bot's own issues: the track query with its assignee qualifier inverted.
+
+        Routed through `query`, so this is the same single `GET /search/issues`
+        a dispatch makes. `bot_login` may cost a `GET /user`; still no write.
+        """
+        return self.query(claimed_search(q, self.bot_login))
+
     def _issue(self, number: str) -> Issue:
         path = f"/repos/{self.repo}/issues/{number}"
         return parse_payload(Issue, self._request("GET", path), "github", path)
@@ -161,6 +172,25 @@ class GitHubSource:
             url=issue.html_url,
             raw=issue.raw,
         )
+
+
+def claimed_search(q: str, login: str) -> str:
+    """Swap the `no:assignee` qualifier for the bot, other qualifiers unmoved.
+
+    A whitespace-token scan rather than a regex: `\\bno:assignee\\b` also matches
+    inside `label:"no:assignee"`, because the quote supplies the word boundary,
+    and would rewrite a label into a qualifier. Exact token equality is the only
+    rule that tells the qualifier apart from a literal containing its text.
+    """
+    tokens = q.split()
+    if not any(token.lower() == NO_ASSIGNEE for token in tokens):
+        raise SourceError(
+            f"github: the track query has no {NO_ASSIGNEE} qualifier to invert: {q!r}",
+            fix=f"Add `{NO_ASSIGNEE}` to the track query so dispatch skips claimed issues.",
+        )
+    return " ".join(
+        f"assignee:{login}" if token.lower() == NO_ASSIGNEE else token for token in tokens
+    )
 
 
 def _number(item_id: str) -> str:

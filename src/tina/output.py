@@ -54,3 +54,15 @@ def dry_run_footer(summary: str = "", action: str = "enqueue") -> None:
         typer.echo(summary, err=True)
         typer.echo("", err=True)
     typer.echo(typer.style(f"Run without --dry-run to {action}.", fg=DIM), err=True)
+
+
+def counts(heading: str, tallies: dict[str, int]) -> None:
+    """A heading and its tallies, for `tina status`.
+
+    The labels are printed as given and are not padded: `status` passes two that
+    are already the same width, and padding a two-row block would be machinery
+    for a column that is already aligned.
+    """
+    typer.echo(typer.style(heading, bold=True) + "\n", err=True)
+    for label, value in tallies.items():
+        typer.echo(f"  {label}: {value}", err=True)

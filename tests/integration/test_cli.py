@@ -56,11 +56,18 @@ pathlib.Path(sys.argv[2], "outcome.json").write_text(outcome)
 class FakeSource:
     """Stands in for a tracker. Records what the CLI asked it to do."""
 
-    def __init__(self, items: list[WorkItem], claimable: bool = True, holder: str = "") -> None:
+    def __init__(
+        self,
+        items: list[WorkItem],
+        claimable: bool = True,
+        holder: str = "",
+        held: list[WorkItem] | None = None,
+    ) -> None:
         self.items = items
         self.claimable = claimable
         self.holder = holder
-        self.claimed: list[str] = []
+        self.held = list(held or [])
+        self.claims: list[str] = []
 
     def query(self, q: str) -> list[WorkItem]:
         self.queried = q
@@ -70,11 +77,15 @@ class FakeSource:
         return next(item for item in self.items if item.id == item_id)
 
     def claim(self, item: WorkItem) -> bool:
-        self.claimed.append(item.id)
+        self.claims.append(item.id)
         return self.claimable
 
     def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
         return ClaimPrognosis(would_claim=self.claimable, holder=self.holder)
+
+    def claimed(self, q: str) -> list[WorkItem]:
+        self.claimed_query = q
+        return list(self.held)
 
 
 class NoClaimSource(FakeSource):
@@ -84,7 +95,7 @@ class NoClaimSource(FakeSource):
     """
 
     def claim(self, item: WorkItem) -> bool:
-        raise AssertionError("a dry run must never claim")
+        raise AssertionError("this command must never claim")
 
 
 class FakeExecutor:
@@ -198,12 +209,13 @@ def plain(output: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", output)
 
 
-def test_help_lists_both_roles() -> None:
+def test_help_lists_the_commands() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
     assert "dispatch" in plain(result.output)
     assert "run" in plain(result.output)
+    assert "status" in plain(result.output)
 
 
 def test_help_lists_the_version_flag() -> None:
@@ -219,6 +231,7 @@ def test_no_arguments_still_prints_help() -> None:
 
     assert "dispatch" in plain(result.output)
     assert "run" in plain(result.output)
+    assert "status" in plain(result.output)
 
 
 def test_version_prints_the_package_version() -> None:
@@ -372,7 +385,7 @@ def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
 
     assert source.queried == "project = VUL"
     assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
-    assert source.claimed == [], "the dispatcher never claims — workers do"
+    assert source.claims == [], "the dispatcher never claims — workers do"
 
 
 def test_dispatch_with_no_matches_enqueues_nothing(project: Path) -> None:
@@ -397,7 +410,7 @@ def test_a_dry_run_enqueues_nothing(project: Path, wired: tuple[FakeSource, Fake
     assert result.exit_code == 0
     assert source.queried == "project = VUL"
     assert executor.enqueued == []
-    assert source.claimed == [], "the dispatcher never claims — workers do"
+    assert source.claims == [], "the dispatcher never claims — workers do"
 
 
 def test_a_dry_run_builds_no_executor(
@@ -557,7 +570,7 @@ def test_run_invokes_the_agent_and_records_the_outcome(project: Path, records: i
     cli.run_item(config.load(project), "vul", "VUL-1", source=source)
 
     record = last_record(records.getvalue())
-    assert source.claimed == ["VUL-1"]
+    assert source.claims == ["VUL-1"]
     assert record["track"] == "vul"
     assert record["item"] == "VUL-1"
     assert record["report"]["outcome"] == "resolved"
@@ -754,7 +767,7 @@ def test_a_normal_run_is_unaffected(project: Path, wired: tuple[FakeSource, Fake
     )
 
     assert result.exit_code == 0
-    assert source.claimed == ["VUL-1"]
+    assert source.claims == ["VUL-1"]
     assert last_record(result.stdout)["message"] == "run complete"
     assert all("dry_run" not in line for line in json_lines(result.stdout))
     assert result.stderr == "", "a normal run prints nothing new on stderr"
@@ -765,3 +778,83 @@ def test_run_help_lists_the_dry_run_flag() -> None:
 
     assert result.exit_code == 0
     assert "--dry-run" in plain(result.output)
+
+
+# --- status: two counts, no writes ------------------------------------------
+
+
+def test_status_reports_both_counts_on_stderr(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The human half, byte for byte. Both labels are 10 wide, so nothing is padded."""
+    wire(monkeypatch, FakeSource(items("VUL-1", "VUL-2"), held=items("VUL-7")))
+
+    result = runner.invoke(cli.app, ["status", "--track", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert plain(result.stderr).splitlines() == [
+        "Track vul",
+        "",
+        "  unclaimed: 2",
+        "  in flight: 1",
+    ]
+
+
+def test_status_logs_one_line_with_dispatchs_field_names(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The machine half: exactly one line, and `matched` means what it means in dispatch."""
+    source = wire(monkeypatch, FakeSource(items("VUL-1", "VUL-2"), held=items("VUL-7")))
+
+    result = runner.invoke(cli.app, ["status", "--track", "vul", "--config", str(project)])
+    lines = json_lines(result.stdout)
+
+    assert result.exit_code == 0
+    assert len(lines) == 1
+    assert set(lines[0]) == {"ts", "level", "logger", "message", "track", "matched", "in_flight"}
+    assert lines[0]["message"] == "status"
+    assert (lines[0]["track"], lines[0]["matched"], lines[0]["in_flight"]) == ("vul", 2, 1)
+    assert "dry_run" not in lines[0], "status has no such mode"
+    assert (source.queried, source.claimed_query) == ("project = VUL", "project = VUL")
+    assert "Track vul" not in result.stdout, "the summary is prose; stdout stays JSON"
+
+
+def test_status_never_claims(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asserted by the absence of the call: the injected source fails the test if asked."""
+    wire(monkeypatch, NoClaimSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, ["status", "--track", "vul", "--config", str(project)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+
+
+def test_status_with_nothing_matching_reports_zeroes(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty backlog and no workers is a valid answer, not an error."""
+    wire(monkeypatch, FakeSource([]))
+
+    result = runner.invoke(cli.app, ["status", "--track", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["matched"] == 0
+    assert last_record(result.stdout)["in_flight"] == 0
+    assert "  unclaimed: 0" in plain(result.stderr)
+    assert "  in flight: 0" in plain(result.stderr)
+
+
+def test_status_reports_an_unknown_track_on_both_streams(project: Path) -> None:
+    result = runner.invoke(cli.app, ["status", "--track", "nope", "--config", str(project)])
+
+    assert result.exit_code == 1
+    assert "no track named 'nope'" in last_record(result.stdout)["message"]
+    assert "✗ " in plain(result.stderr)
+
+
+def test_status_help_lists_the_track_option() -> None:
+    result = runner.invoke(cli.app, ["status", "--help"])
+
+    assert result.exit_code == 0
+    assert "--track" in plain(result.output)
+    assert "--config" in plain(result.output)

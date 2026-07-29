@@ -62,6 +62,16 @@ class Source(Protocol):
         """
         ...
 
+    def claimed(self, q: str) -> list[WorkItem]:
+        """The items matching `q` that the bot currently holds.
+
+        The complement of `query`, not a filter on top of it: a track query
+        excludes claimed items by construction (ADR-004), so the adapter
+        *replaces* that exclusion with its own identity rather than appending
+        to it. Read-only, like `claim_prognosis` — one search, no writes.
+        """
+        ...
+
 
 class SourceError(TinaError, RuntimeError):
     """A source adapter could not talk to its tracker."""

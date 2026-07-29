@@ -6,6 +6,7 @@ being empty, then confirmed by re-reading the issue.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -17,6 +18,13 @@ from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, requir
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
 FIELDS = ["summary", "description", "assignee", "status"]
+
+#: The four spellings of "nobody holds this" that JQL accepts. `IS NOT EMPTY`
+#: deliberately does not match: `NOT` is neither `EMPTY` nor `NULL`, so the
+#: alternation fails and the query falls through to the error in `claimed_jql`
+#: — it means the opposite, and silently inverting it would report the wrong
+#: number.
+EMPTY_ASSIGNEE = re.compile(r"\bassignee\s*(?:=|\bIS\b)\s*(?:EMPTY|NULL)\b", re.IGNORECASE)
 
 
 class SearchRequest(BaseModel):
@@ -128,6 +136,15 @@ class JiraSource:
         # is reserved for nobody holding it.
         return ClaimPrognosis(would_claim=False, holder=assignee.account_id or "unknown")
 
+    def claimed(self, q: str) -> list[WorkItem]:
+        """The bot's own issues: the track query with its emptiness clause inverted.
+
+        Routed through `query`, so this is the same single
+        `POST /rest/api/3/search/jql` a dispatch makes — a different JQL string,
+        not a different kind of request.
+        """
+        return self.query(claimed_jql(q, self.bot_account_id))
+
     def _issue(self, item_id: str) -> Issue:
         path = f"{ISSUE_PATH}/{item_id}"
         response = self._request("GET", path, params={"fields": ",".join(FIELDS)})
@@ -155,6 +172,28 @@ class JiraSource:
             url=f"{self.base_url}/browse/{key}",
             raw=issue.raw,
         )
+
+
+def claimed_jql(q: str, account_id: str) -> str:
+    """Swap the empty-assignee clause for the bot, leaving the rest of `q` alone.
+
+    A predicate is substituted for a predicate, so the surrounding `AND`s are
+    preserved by construction and no clause can be left dangling — that is what
+    keeps the two counts two halves of one question: project, status, and every
+    other filter still apply to the in-flight count.
+
+    Known limitation, accepted: a quoted literal containing the phrase —
+    `summary ~ "assignee is empty"` — is rewritten too. JQL has no cheap way to
+    skip string literals without a tokenizer, and a track whose text search
+    contains that exact phrase is not a case worth a parser.
+    """
+    rewritten, swapped = EMPTY_ASSIGNEE.subn(f'assignee = "{account_id}"', q)
+    if not swapped:
+        raise SourceError(
+            f"jira: the track query has no empty-assignee clause to invert: {q!r}",
+            fix="Add `AND assignee IS EMPTY` to the track query so dispatch skips claimed issues.",
+        )
+    return rewritten
 
 
 def render_adf(node: Any) -> str:

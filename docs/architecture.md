@@ -207,6 +207,7 @@ query. All judgment about what the item actually is happens inside the track.
 | Operation | Used by | Purpose |
 |---|---|---|
 | `query()` | dispatcher | run the configured query, return work items |
+| `claimed(q)` | `status` | the same query with its unclaimed clause inverted: what workers hold now |
 | `claim(item)` | worker | mark the item as taken; fail if already claimed |
 | `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
 
