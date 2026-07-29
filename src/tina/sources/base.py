@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import Protocol, runtime_checkable
 
+from tina.errors import TinaError
 from tina.models import WorkItem
 
 
@@ -33,7 +34,7 @@ class Source(Protocol):
         ...
 
 
-class SourceError(RuntimeError):
+class SourceError(TinaError, RuntimeError):
     """A source adapter could not talk to its tracker."""
 
 

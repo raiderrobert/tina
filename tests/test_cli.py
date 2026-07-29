@@ -10,13 +10,16 @@ from typing import Any
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
-from tina import cli, config, log, verify
+from tina import cli, config, executors, log, sources, verify
 from tina.models import OutcomeReport, OutcomeStatus, WorkItem
 
 # The one URL the stubbed verifier considers real.
 GOOD_ARTIFACT = "https://example.test/pr/1"
 MISSING_ARTIFACT = "https://example.test/pr/999"
+
+runner = CliRunner()
 
 CONFIG = """
 harness = "fake"
@@ -73,10 +76,11 @@ class FakeExecutor:
 
 @pytest.fixture
 def records() -> Iterator[io.StringIO]:
-    """The JSON log lines `dispatch`/`run` emit, collected in memory.
+    """The JSON log lines the entrypoint functions emit, collected in memory.
 
-    `cli.main` calls `log.configure()` itself; the entrypoint functions it calls
-    do not, so tests that skip `main` install the same formatter here.
+    The typer commands call `log.configure()` themselves; `dispatch_workflow`
+    and `run_item` do not, so tests that skip the command layer install the same
+    formatter here.
     """
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
@@ -122,6 +126,16 @@ def project(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def wired(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeSource, FakeExecutor]:
+    """Point the adapter factories at fakes, so the real argv path can be driven."""
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor()
+    monkeypatch.setattr(sources, "build", lambda workflow, client=None: source)
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+    return source, executor
+
+
 def outcome_written(project: Path, payload: dict[str, Any]) -> None:
     (project.parent / "outcome_to_write.json").write_text(json.dumps(payload))
 
@@ -137,19 +151,97 @@ def items(*ids: str) -> list[WorkItem]:
     return [WorkItem(id=item_id, source="jira", title=item_id) for item_id in ids]
 
 
-def test_parser_defaults() -> None:
-    args = cli.build_parser().parse_args(["dispatch", "--workflow", "vul"])
+# --- the command layer: argv, defaults, exit codes -------------------------
 
-    assert (args.limit, args.config) == (1, "tina.toml")
+
+def test_help_lists_both_roles() -> None:
+    result = runner.invoke(cli.app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "dispatch" in result.output
+    assert "run" in result.output
+
+
+def test_dispatch_defaults_to_one_worker_and_tina_toml(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    _, executor = wired
+
+    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1")], "--limit defaults to 1"
+
+
+def test_config_defaults_to_tina_toml_in_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul"])
+
+    assert result.exit_code == 1
+    assert "tina.toml" in last_record(result.output)["message"]
+
+
+def test_limit_is_passed_through(project: Path, wired: tuple[FakeSource, FakeExecutor]) -> None:
+    _, executor = wired
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
+
+
+def test_run_exits_zero_when_the_agent_reports_failed(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The outcome is data, not a process failure."""
+    outcome_written(project, {"outcome": "failed", "details": "no credentials for the repo"})
+
+    result = runner.invoke(
+        cli.app, ["run", "--workflow", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.output)["effective_status"] == OutcomeStatus.FAILED
+
+
+def test_missing_required_option_is_a_usage_error(project: Path) -> None:
+    result = runner.invoke(cli.app, ["run", "--workflow", "vul", "--config", str(project)])
+
+    assert result.exit_code == 2, "typer reports a usage error, not a tina error"
+
+
+def test_reports_a_bad_config() -> None:
+    result = runner.invoke(
+        cli.app, ["dispatch", "--workflow", "vul", "--config", "/nonexistent/tina.toml"]
+    )
+
+    assert result.exit_code == 1
+    assert "not found" in last_record(result.output)["message"]
+
+
+def test_reports_an_unknown_workflow(project: Path) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "--workflow", "bug", "--item", "1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 1
+    assert "no workflow named 'bug'" in last_record(result.output)["message"]
+
+
+# --- the orchestration layer -----------------------------------------------
 
 
 def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
     source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
     executor = FakeExecutor()
 
-    code = cli.dispatch(config.load(project), "vul", 2, source=source, executor=executor)
+    cli.dispatch_workflow(config.load(project), "vul", 2, source=source, executor=executor)
 
-    assert code == 0
     assert source.queried == "project = VUL"
     assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
     assert source.claimed == [], "the dispatcher never claims — workers do"
@@ -158,7 +250,7 @@ def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
 def test_dispatch_with_no_matches_enqueues_nothing(project: Path) -> None:
     executor = FakeExecutor()
 
-    cli.dispatch(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
+    cli.dispatch_workflow(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
 
     assert executor.enqueued == []
 
@@ -174,10 +266,9 @@ def test_run_invokes_the_agent_and_records_the_outcome(project: Path, records: i
     )
     source = FakeSource(items("VUL-1"))
 
-    code = cli.run(config.load(project), "vul", "VUL-1", source=source)
+    cli.run_item(config.load(project), "vul", "VUL-1", source=source)
 
     record = last_record(records.getvalue())
-    assert code == 0
     assert source.claimed == ["VUL-1"]
     assert record["workflow"] == "vul"
     assert record["item"] == "VUL-1"
@@ -200,57 +291,29 @@ def test_run_flips_the_status_when_an_artifact_is_missing(
         },
     )
 
-    code = cli.run(config.load(project), "vul", "VUL-1", source=FakeSource(items("VUL-1")))
+    record = cli.run_item(config.load(project), "vul", "VUL-1", source=FakeSource(items("VUL-1")))
 
-    record = last_record(records.getvalue())
-    assert code == 0, "an unverified artifact is a finding, not a tina failure"
-    assert record["report"]["outcome"] == "resolved", "the agent's report is preserved"
-    assert record["report"]["verified"] is False
-    assert record["effective_status"] == OutcomeStatus.NEEDS_HUMAN
+    assert record.report.outcome is OutcomeStatus.RESOLVED, "the agent's report is preserved"
+    assert record.report.verified is False
+    assert record.effective_status is OutcomeStatus.NEEDS_HUMAN
+    assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NEEDS_HUMAN
 
 
 def test_run_without_artifacts_is_not_verified(project: Path, records: io.StringIO) -> None:
     outcome_written(project, {"outcome": "resolved", "details": "already fixed upstream"})
 
-    cli.run(config.load(project), "vul", "VUL-1", source=FakeSource(items("VUL-1")))
+    cli.run_item(config.load(project), "vul", "VUL-1", source=FakeSource(items("VUL-1")))
 
     record = last_record(records.getvalue())
     assert record["report"]["verified"] is None
     assert record["effective_status"] == OutcomeStatus.RESOLVED
 
 
-def test_a_failed_agent_is_still_a_successful_run(project: Path, records: io.StringIO) -> None:
-    """The outcome is data, not a process failure."""
-    outcome_written(project, {"outcome": "failed", "details": "no credentials for the repo"})
-
-    code = cli.run(config.load(project), "vul", "VUL-1", source=FakeSource(items("VUL-1")))
-
-    assert code == 0
-    assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.FAILED
-
-
 def test_a_lost_claim_exits_no_action_needed(project: Path, records: io.StringIO) -> None:
     source = FakeSource(items("VUL-1"), claimable=False)
 
-    code = cli.run(config.load(project), "vul", "VUL-1", source=source)
+    record = cli.run_item(config.load(project), "vul", "VUL-1", source=source)
 
-    record = last_record(records.getvalue())
-    assert code == 0
-    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
-    assert record["exit_code"] is None, "the harness never ran"
-
-
-def test_main_reports_a_bad_config(capsys: pytest.CaptureFixture[str]) -> None:
-    code = cli.main(["dispatch", "--workflow", "vul", "--config", "/nonexistent/tina.toml"])
-
-    assert code == 1
-    assert "not found" in last_record(capsys.readouterr().out)["message"]
-
-
-def test_main_reports_an_unknown_workflow(
-    project: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    code = cli.main(["run", "--workflow", "bug", "--item", "1", "--config", str(project)])
-
-    assert code == 1
-    assert "no workflow named 'bug'" in last_record(capsys.readouterr().out)["message"]
+    assert record.effective_status is OutcomeStatus.NO_ACTION_NEEDED
+    assert record.exit_code is None, "the harness never ran"
+    assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED

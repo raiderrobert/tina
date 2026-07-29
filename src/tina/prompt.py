@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tina.errors import TinaError
 from tina.models import WorkItem
 
 SKILL_FILE = "SKILL.md"
 
 
-class PromptError(RuntimeError):
+class PromptError(TinaError, RuntimeError):
     """The activity skill could not be read."""
 
 

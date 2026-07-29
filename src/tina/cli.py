@@ -1,72 +1,92 @@
-"""`tina dispatch` and `tina run`. Two roles, one image."""
+"""`tina dispatch` and `tina run`. Two roles, one image.
+
+The typer commands are a thin shell: they parse argv, load config, and turn a
+`TinaError` into exit 1. The orchestration lives in `dispatch_workflow` and
+`run_item`, which take already-built objects so callers (and tests) can inject
+a source or executor.
+"""
 
 from __future__ import annotations
 
-import argparse
-import sys
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Annotated
+
+import typer
 
 from tina import executors, harness, log, prompt, sources, verify
-from tina.config import Config, ConfigError
+from tina.config import Config
 from tina.config import load as load_config
-from tina.executors.base import Executor, ExecutorError
+from tina.errors import TinaError
+from tina.executors.base import Executor
 from tina.models import OutcomeReport, OutcomeStatus, RunRecord
-from tina.prompt import PromptError
-from tina.sources.base import Source, SourceError
+from tina.sources.base import Source
 
-DEFAULT_CONFIG = "tina.toml"
+DEFAULT_CONFIG = Path("tina.toml")
 
 logger = log.get_logger("tina")
 
+app = typer.Typer(
+    name="tina",
+    help="An autonomous factory: claim a work item, run an agent once, record it.",
+    no_args_is_help=True,
+    add_completion=False,
+    pretty_exceptions_enable=False,
+)
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="tina",
-        description="An autonomous factory: claim a work item, run an agent once, record it.",
-    )
-    subcommands = parser.add_subparsers(dest="command", required=True)
-
-    dispatch = subcommands.add_parser(
-        "dispatch", help="run the source query and enqueue up to --limit workers"
-    )
-    dispatch.add_argument("--workflow", required=True)
-    dispatch.add_argument("--limit", type=int, default=1)
-    dispatch.add_argument("--config", default=DEFAULT_CONFIG)
-
-    run = subcommands.add_parser(
-        "run", help="claim one work item, run the agent, record the outcome"
-    )
-    run.add_argument("--workflow", required=True)
-    run.add_argument("--item", required=True)
-    run.add_argument("--config", default=DEFAULT_CONFIG)
-
-    return parser
+WorkflowOption = Annotated[str, typer.Option("--workflow", help="Workflow table in the config.")]
+ConfigOption = Annotated[Path, typer.Option("--config", help="Path to the TOML config file.")]
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    log.configure()
-
-    try:
-        config = load_config(args.config)
-        if args.command == "dispatch":
-            return dispatch(config, args.workflow, args.limit)
-        return run(config, args.workflow, args.item)
-    except (ConfigError, ExecutorError, SourceError, PromptError) as exc:
-        # Tina's own failure, as opposed to an agent reporting `failed`.
-        logger.error(str(exc), extra={"command": args.command})
-        return 1
-
-
+@app.command()
 def dispatch(
+    workflow: WorkflowOption,
+    limit: Annotated[
+        int, typer.Option("--limit", help="Maximum number of workers to enqueue.")
+    ] = 1,
+    config: ConfigOption = DEFAULT_CONFIG,
+) -> None:
+    """Run the source query and enqueue up to --limit workers."""
+    with _exit_on_tina_error("dispatch"):
+        dispatch_workflow(load_config(config), workflow, limit)
+
+
+@app.command()
+def run(
+    workflow: WorkflowOption,
+    item: Annotated[str, typer.Option("--item", help="Tracker identifier of the work item.")],
+    config: ConfigOption = DEFAULT_CONFIG,
+) -> None:
+    """Claim one work item, run the agent, record the outcome."""
+    with _exit_on_tina_error("run"):
+        run_item(load_config(config), workflow, item)
+
+
+@contextmanager
+def _exit_on_tina_error(command: str) -> Iterator[None]:
+    """Exit 1 for Tina's own failures — and only those.
+
+    An agent reporting `failed` never lands here: that is an outcome, not a
+    process failure, so the run still exits 0.
+    """
+    log.configure()
+    try:
+        yield
+    except TinaError as exc:
+        logger.error(str(exc), extra={"command": command})
+        raise typer.Exit(code=1) from None
+
+
+def dispatch_workflow(
     config: Config,
     workflow_name: str,
     limit: int,
     source: Source | None = None,
     executor: Executor | None = None,
-) -> int:
+) -> None:
     """Query, take up to `limit` items, enqueue one worker each.
 
     The dispatcher never runs an agent and never claims — workers claim, so a
@@ -88,23 +108,23 @@ def dispatch(
             extra={
                 "workflow": workflow.name,
                 "item": item.id,
-                "url": item.url,
+                "url": str(item.url or ""),
                 "executor": config.executor,
             },
         )
-    return 0
 
 
-def run(
+def run_item(
     config: Config,
     workflow_name: str,
     item_id: str,
     source: Source | None = None,
-) -> int:
+) -> RunRecord:
     """Claim one item, run the agent once, verify, record.
 
-    Exit code reports whether *Tina* worked. An agent reporting `failed` is
-    still a successful run: the outcome is data, not a process failure.
+    Returns the record it logged. Every agent outcome is a successful run — the
+    outcome is data, not a process failure — so this never signals via an
+    exception unless Tina itself broke.
     """
     started = time.monotonic()
     workflow = config.workflow(workflow_name)
@@ -112,10 +132,7 @@ def run(
 
     item = source.get(item_id)
     if not source.claim(item):
-        logger.info(
-            "already claimed",
-            extra={"workflow": workflow.name, "item": item.id},
-        )
+        logger.info("already claimed", extra={"workflow": workflow.name, "item": item.id})
         return _record(
             workflow.name,
             item.id,
@@ -143,7 +160,7 @@ def _record(
     report: OutcomeReport,
     exit_code: int | None,
     started: float,
-) -> int:
+) -> RunRecord:
     record = RunRecord.build(
         workflow=workflow,
         item=item,
@@ -152,8 +169,13 @@ def _record(
         duration_seconds=time.monotonic() - started,
     )
     logger.info("run complete", extra=record.model_dump(mode="json"))
-    return 0
+    return record
+
+
+def main() -> None:
+    """Console script and `python -m tina` entrypoint."""
+    app()
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    main()

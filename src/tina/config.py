@@ -28,6 +28,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from tina.errors import TinaError
+
 SOURCES = ("jira", "github")
 EXECUTORS = ("local", "cloudrun")
 
@@ -36,7 +38,7 @@ _SCALAR_KEYS = frozenset({"harness", "executor", "activities_dir"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
 
-class ConfigError(ValueError):
+class ConfigError(TinaError, ValueError):
     """Raised for anything wrong with a config file. Always names the file."""
 
 

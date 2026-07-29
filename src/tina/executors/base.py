@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from tina.errors import TinaError
+
 
 @runtime_checkable
 class Executor(Protocol):
@@ -14,5 +16,5 @@ class Executor(Protocol):
         ...
 
 
-class ExecutorError(RuntimeError):
+class ExecutorError(TinaError, RuntimeError):
     """An executor could not enqueue a worker."""
