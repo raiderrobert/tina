@@ -73,7 +73,7 @@ class CloudRunExecutor:
 
 def _run_v2() -> Any:
     try:
-        # ty: ignore[unresolved-import]  # only present with the `cloudrun` extra
+        # only present with the `cloudrun` extra
         from google.cloud import run_v2
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ExecutorError(INSTALL_HINT) from exc

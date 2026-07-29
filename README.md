@@ -67,11 +67,23 @@ Design stage. v1 scope is §18 of the architecture doc.
 
 ## Development
 
+[just](https://github.com/casey/just) is the task runner (`brew install just`).
+
 ```bash
-uv sync              # Install all dependencies
-uv run pytest        # Run tests
-uv run ruff check    # Lint
-uv run ty check      # Type check
+just setup    # Install all dependencies
+just check    # Format check, lint, type check, tests
+just fmt      # Auto-fix formatting and lint
+just test     # Run tests
+```
+
+Without just:
+
+```bash
+uv sync --all-extras       # Install all dependencies
+uv run ruff format --check # Format check
+uv run ruff check          # Lint
+uv run ty check            # Type check
+uv run pytest              # Run tests
 ```
 
 ## License
