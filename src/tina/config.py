@@ -163,7 +163,8 @@ class Config(BaseModel):
     def cloudrun_options(self) -> CloudRunOptions:
         if self.executors.cloudrun is None:
             raise ConfigError(
-                f"{self.path}: executor 'cloudrun' requires an [executors.cloudrun] table"
+                f"{self.path}: executor 'cloudrun' requires an [executors.cloudrun] table",
+                fix="Add an [executors.cloudrun] table with project, region, and job keys.",
             )
         return self.executors.cloudrun
 
@@ -183,16 +184,16 @@ def load(path: Path | str) -> Config:
     except FileNotFoundError:
         raise ConfigError(f"{path}: config file not found") from None
     except tomllib.TOMLDecodeError as exc:
-        hint = ""
+        fix = ""
         if "overwrite" in str(exc):
             # The common one: `harness = "pi"` followed by `[harness.pi]`. TOML
             # forbids reusing a scalar key as a table, so definitions live under
             # the plural `[harnesses.*]` / `[executors.*]`.
-            hint = (
-                " (harness/executor select an adapter by name; define them under"
-                " [harnesses.<name>] and [executors.<name>])"
+            fix = (
+                "harness/executor select an adapter by name; define them under"
+                " [harnesses.<name>] and [executors.<name>]"
             )
-        raise ConfigError(f"{path}: invalid TOML: {exc}{hint}") from None
+        raise ConfigError(f"{path}: invalid TOML: {exc}", fix=fix) from None
     return parse(raw, path)
 
 

@@ -302,6 +302,38 @@ def test_reports_an_unknown_workflow(project: Path) -> None:
     assert "no workflow named 'bug'" in last_record(result.output)["message"]
 
 
+# --- both halves of the stdout/stderr boundary ------------------------------
+
+
+def test_a_toml_typo_reports_on_both_streams(tmp_path: Path) -> None:
+    """The JSON error line still parses off stdout; the fix block lands on stderr."""
+    path = tmp_path / "tina.toml"
+    path.write_text('harness = "pi"\n\n[harness.pi]\ncommand = ["pi"]\n')
+
+    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(path)])
+
+    assert result.exit_code == 1
+    assert "invalid TOML" in last_record(result.stdout)["message"]
+    stderr = plain(result.stderr)
+    assert "✗ " in stderr
+    assert "Fix:   harness/executor select an adapter by name" in stderr
+    assert "[harnesses.<name>]" in stderr
+
+
+def test_a_missing_env_var_reports_on_both_streams(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `wired` fixture here, so the real source is built and require_env fires."""
+    for name in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+
+    assert result.exit_code == 1
+    assert "JIRA_BASE_URL" in last_record(result.stdout)["message"]
+    assert "Fix:   Set JIRA_BASE_URL in the worker environment." in plain(result.stderr)
+
+
 # --- the orchestration layer -----------------------------------------------
 
 

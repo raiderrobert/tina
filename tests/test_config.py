@@ -100,8 +100,11 @@ def test_missing_file(tmp_path: Path) -> None:
 def test_scalar_and_table_collision_gets_a_hint(tmp_path: Path) -> None:
     """`harness = "pi"` plus `[harness.pi]` is invalid TOML; say what to do instead."""
     text = 'harness = "pi"\n\n[harness.pi]\ncommand = ["pi"]\n'
-    with pytest.raises(config.ConfigError, match=r"\[harnesses\.<name>\]"):
+    with pytest.raises(config.ConfigError) as excinfo:
         config.load(write(tmp_path, text))
+
+    assert "invalid TOML" in str(excinfo.value)
+    assert "[harnesses.<name>]" in excinfo.value.fix
 
 
 def test_cloudrun_options_are_kept(tmp_path: Path) -> None:

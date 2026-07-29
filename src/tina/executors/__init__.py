@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tina.config import Config
+from tina.config import EXECUTORS, Config
 from tina.executors.base import Executor, ExecutorError
 from tina.executors.cloudrun import CloudRunExecutor
 from tina.executors.local import LocalExecutor
@@ -16,4 +16,7 @@ def build(config: Config) -> Executor:
         return LocalExecutor(config_path=config.path)
     if config.executor == "cloudrun":
         return CloudRunExecutor(config.cloudrun_options(), config.path)
-    raise ExecutorError(f"unknown executor {config.executor!r}")
+    raise ExecutorError(
+        f"unknown executor {config.executor!r}",
+        fix=f"Set executor to one of: {', '.join(EXECUTORS)}.",
+    )

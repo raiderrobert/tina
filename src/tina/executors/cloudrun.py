@@ -15,8 +15,8 @@ from tina.log import get_logger
 log = get_logger(__name__)
 
 INSTALL_HINT = (
-    "the cloudrun executor needs google-cloud-run; install tina with the extra: "
-    "`uv add 'tina-cli[cloudrun]'` or `pip install 'tina-cli[cloudrun]'`"
+    "install tina with the extra: `uv add 'tina-cli[cloudrun]'` or "
+    "`pip install 'tina-cli[cloudrun]'`"
 )
 
 
@@ -76,7 +76,9 @@ def _run_v2() -> Any:
         # only present with the `cloudrun` extra
         from google.cloud import run_v2
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
-        raise ExecutorError(INSTALL_HINT) from exc
+        raise ExecutorError(
+            "the cloudrun executor needs google-cloud-run", fix=INSTALL_HINT
+        ) from exc
     return run_v2
 
 

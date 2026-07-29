@@ -42,5 +42,8 @@ def test_all_four_outcomes_are_described(tmp_path: Path, work_item: WorkItem) ->
 
 
 def test_missing_skill_points_at_napoln(tmp_path: Path, work_item: WorkItem) -> None:
-    with pytest.raises(prompt.PromptError, match="napoln"):
+    with pytest.raises(prompt.PromptError) as excinfo:
         prompt.build(tmp_path / "activities" / "nope", work_item, tmp_path / "outcome.json")
+
+    assert "activity skill not found" in str(excinfo.value)
+    assert "napoln" in excinfo.value.fix

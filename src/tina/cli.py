@@ -17,7 +17,7 @@ from typing import Annotated
 
 import typer
 
-from tina import executors, harness, log, prompt, sources, verify
+from tina import executors, harness, log, output, prompt, sources, verify
 from tina.config import Config
 from tina.config import load as load_config
 from tina.errors import TinaError
@@ -96,12 +96,16 @@ def _exit_on_tina_error(command: str) -> Iterator[None]:
 
     An agent reporting `failed` never lands here: that is an outcome, not a
     process failure, so the run still exits 0.
+
+    Both halves of the boundary fire: the JSON record on stdout for whatever is
+    collecting runs, and the human block on stderr for whoever ran the command.
     """
     log.configure()
     try:
         yield
     except TinaError as exc:
         logger.error(str(exc), extra={"command": command})
+        output.error(str(exc), exc.cause, exc.fix)
         raise typer.Exit(code=1) from None
 
 

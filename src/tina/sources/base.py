@@ -45,7 +45,10 @@ def require_env(name: str, source: str) -> str:
     """Read a required environment variable or fail with a usable message."""
     value = os.environ.get(name)
     if not value:
-        raise SourceError(f"{source} source requires the {name} environment variable")
+        raise SourceError(
+            f"{source} source requires the {name} environment variable",
+            fix=f"Set {name} in the worker environment.",
+        )
     return value
 
 

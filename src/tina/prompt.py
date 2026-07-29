@@ -78,8 +78,9 @@ def read_skill(activity_dir: Path) -> str:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise PromptError(
-            f"activity skill not found at {path} — activities are installed into the "
-            "activities directory with napoln, not shipped with tina"
+            f"activity skill not found at {path}",
+            fix="Activities are installed into the activities directory with"
+            " napoln; tina ships none.",
         ) from None
     except OSError as exc:
         raise PromptError(f"could not read activity skill at {path}: {exc}") from exc

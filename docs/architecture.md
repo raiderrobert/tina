@@ -31,6 +31,11 @@ tina dispatch --workflow vul --limit 5     # what the scheduler calls
 tina run --workflow vul --item VUL-123     # what the executor spawns; also local dev
 ```
 
+Both subcommands split their output by audience: stdout carries the structured
+JSON log — one object per line, including the error record when a run fails —
+and stderr carries the human-readable `✗ message / Cause: / Fix:` block, so a
+collector parsing stdout never has prose to skip.
+
 Tina does not own scheduling. There is no open standard for declaring a schedule
 that targets native cloud schedulers, and cron dialects are not even portable
 across them (EventBridge uses 6 fields with `?` and a year; GCP, k8s, and

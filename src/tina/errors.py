@@ -12,4 +12,14 @@ from __future__ import annotations
 
 
 class TinaError(Exception):
-    """A failure in Tina itself, as opposed to an outcome an agent reported."""
+    """A failure in Tina itself, as opposed to an outcome an agent reported.
+
+    `message` says what broke and names the file or path involved; `cause` is
+    the underlying detail when there is one; `fix` is the single action that
+    resolves it. Only the CLI boundary renders them — see `tina.output`.
+    """
+
+    def __init__(self, message: str, cause: str = "", fix: str = "") -> None:
+        super().__init__(message)
+        self.cause = cause
+        self.fix = fix
