@@ -1,5 +1,5 @@
 [project]
-name = "tina"
+name = "tina-cli"
 version = "0.1.0"
 description = "An autonomous factory. Orchestration only: claim a work item, run an agent once, record the outcome."
 readme = "README.md"

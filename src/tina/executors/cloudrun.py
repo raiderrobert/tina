@@ -1,6 +1,6 @@
 """Cloud Run executor: one job execution per work item, against the same image.
 
-Requires the optional dependency: `pip install tina[cloudrun]`.
+Requires the optional dependency: `pip install tina-cli[cloudrun]`.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ log = get_logger(__name__)
 
 INSTALL_HINT = (
     "the cloudrun executor needs google-cloud-run; install tina with the extra: "
-    "`uv add 'tina[cloudrun]'` or `pip install 'tina[cloudrun]'`"
+    "`uv add 'tina-cli[cloudrun]'` or `pip install 'tina-cli[cloudrun]'`"
 )
 
 

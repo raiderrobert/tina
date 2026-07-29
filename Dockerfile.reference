@@ -17,8 +17,8 @@
 # # 1. Tina itself.
 # # ---------------------------------------------------------------------------
 # # Add the [cloudrun] extra only if the dispatcher enqueues Cloud Run jobs.
-# RUN pip install --no-cache-dir "tina @ git+https://github.com/raiderrobert/tina@v0.1.0"
-# # RUN pip install --no-cache-dir "tina[cloudrun] @ git+https://github.com/..."
+# RUN pip install --no-cache-dir "tina-cli @ git+https://github.com/raiderrobert/tina@v0.1.0"
+# # RUN pip install --no-cache-dir "tina-cli[cloudrun] @ git+https://github.com/..."
 #
 # # ---------------------------------------------------------------------------
 # # 2. The agent harness. Tina does not ship one — it shells out to whatever the
