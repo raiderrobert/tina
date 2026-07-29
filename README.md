@@ -60,12 +60,15 @@ without Tina knowing about them.
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | System design — workflows, dispatch/worker, adapters, outcome contract, v1 scope |
 | [docs/adr/](docs/adr/) | Architecture decision records — the reasoning behind each design choice |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the check loop, layout, how to add adapters, commit conventions |
 
 ## Status
 
-Design stage. v1 scope is §18 of the architecture doc.
+Implemented, pre-release. Not yet published to PyPI. v1 scope is §18 of the architecture doc.
 
 ## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 
 [just](https://github.com/casey/just) is the task runner (`brew install just`).
 
