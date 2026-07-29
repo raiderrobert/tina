@@ -122,7 +122,7 @@ def test_cloudrun_options_are_kept(tmp_path: Path) -> None:
 
 
 def test_example_config_is_valid() -> None:
-    cfg = config.load(Path(__file__).parent.parent / "examples" / "tina.toml")
+    cfg = config.load(Path(__file__).parent.parent.parent / "examples" / "tina.toml")
 
     assert sorted(cfg.workflows) == ["bug", "vul"]
     assert cfg.workflow("bug").repo == "acme/api"

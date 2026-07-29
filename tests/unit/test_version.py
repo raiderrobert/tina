@@ -13,7 +13,7 @@ import pytest
 
 import tina
 
-PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
+PYPROJECT = Path(__file__).resolve().parent.parent.parent / "pyproject.toml"
 
 
 def read_pyproject() -> dict[str, Any]:

@@ -61,7 +61,8 @@ authoritative; each rule below is argued in the record it links.
 - No test touches the network. Fake HTTP through the `make_client` fixture
   (`httpx.MockTransport`). Do not add `pytest-httpx`, `responses`, `vcr`, or
   live-network tests.
-- `tests/` is flat. Do not create `unit/` or `integration/` subdirectories.
+- Unit tests (one file per module) go in `tests/unit/`; tests that drive the
+  full CLI stack go in `tests/integration/`. There is no `tests/fixtures/`.
 
 ## Real Trackers
 

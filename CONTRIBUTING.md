@@ -70,7 +70,7 @@ src/tina/
     ├── local.py
     └── cloudrun.py
 
-tests/                 # Flat: conftest.py plus one test_*.py per module
+tests/                 # conftest.py + unit/ (per-module) + integration/ (through the CLI)
 docs/architecture.md   # System design
 docs/adr/              # Architecture decision records
 examples/tina.toml     # Worked configuration
@@ -84,7 +84,7 @@ justfile               # Every check, in one place
    `get`, `claim`. Use `require_env` and `parse_payload` from the same module
    for credentials and response validation.
 2. Register it in the `build()` dispatch in `src/tina/sources/__init__.py`.
-3. Add `tests/test_sources_<name>.py`, modeled on `test_sources_jira.py` and
+3. Add `tests/unit/test_sources_<name>.py`, modeled on `test_sources_jira.py` and
    `test_sources_github.py`.
 
 `JiraSource` and `GitHubSource` are the templates. Copy their shape.
@@ -94,7 +94,7 @@ justfile               # Every check, in one place
 1. Implement the `Executor` protocol in `src/tina/executors/base.py` —
    `enqueue`.
 2. Register it in `build()` in `src/tina/executors/__init__.py`.
-3. Add cases to `tests/test_executors.py`, modeled on the existing `local` and
+3. Add cases to `tests/unit/test_executors.py`, modeled on the existing `local` and
    `cloudrun` tests.
 
 `LocalExecutor` and `CloudRunExecutor` are the templates.
@@ -114,8 +114,14 @@ credential variable gets added to `clean_env`'s list.
 
 `work_item` is the shared `WorkItem` sample.
 
-`tests/` is flat — `conftest.py` plus one `test_*.py` per module. There is no
-`unit/` or `integration/` split.
+`tests/unit/` holds one `test_*.py` per module. `tests/integration/` holds
+tests that drive tina through the composition seam — a real on-disk config,
+source, prompt, harness subprocess, and verification in one run. Shared
+fixtures stay in `tests/conftest.py`.
+
+There is no `tests/fixtures/` directory. Tests generate the configuration they
+need per case — each `tina.toml` variant *is* the assertion — so a committed
+file would only put the input a directory away from the test that explains it.
 
 ## Commits
 
