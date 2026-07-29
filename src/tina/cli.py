@@ -41,6 +41,31 @@ WorkflowOption = Annotated[str, typer.Option("--workflow", help="Workflow table 
 ConfigOption = Annotated[Path, typer.Option("--config", help="Path to the TOML config file.")]
 
 
+def _version_callback(value: bool) -> None:
+    """Print the version and stop before any config is loaded.
+
+    The module is imported and read through, rather than binding `__version__`
+    at import time, so the value stays correct when tests reload `tina`.
+    """
+    if value:
+        import tina
+
+        typer.echo(f"tina {tina.__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _global_options(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version", callback=_version_callback, is_eager=True, help="Show tina version."
+        ),
+    ] = False,
+) -> None:
+    """An autonomous factory: claim a work item, run an agent once, record it."""
+
+
 @app.command()
 def dispatch(
     workflow: WorkflowOption,

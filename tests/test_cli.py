@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import io
 import json
 import logging
 import sys
 from collections.abc import Iterator
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
+import tina
 from tina import cli, config, executors, log, sources, verify
 from tina.models import OutcomeReport, OutcomeStatus, WorkItem
 
@@ -160,6 +164,58 @@ def test_help_lists_both_roles() -> None:
     assert result.exit_code == 0
     assert "dispatch" in result.output
     assert "run" in result.output
+
+
+def test_help_lists_the_version_flag() -> None:
+    result = runner.invoke(cli.app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "--version" in result.output
+
+
+def test_no_arguments_still_prints_help() -> None:
+    """`no_args_is_help=True` survives the new callback."""
+    result = runner.invoke(cli.app, [])
+
+    assert "dispatch" in result.output
+    assert "run" in result.output
+
+
+def test_version_prints_the_package_version() -> None:
+    result = runner.invoke(cli.app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output == f"tina {tina.__version__}\n"
+
+
+def test_version_needs_no_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag is eager: no tina.toml, no config load, still exit 0."""
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(cli.app, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output == f"tina {tina.__version__}\n"
+
+
+def test_version_falls_back_when_the_distribution_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading `tina.__version__` at call time keeps the fallback visible."""
+
+    def not_found(name: str) -> str:
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", not_found)
+    try:
+        importlib.reload(tina)
+        result = runner.invoke(cli.app, ["--version"])
+
+        assert result.exit_code == 0
+        assert result.output == f"tina {tina.FALLBACK_VERSION}\n"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(tina)
 
 
 def test_dispatch_defaults_to_one_worker_and_tina_toml(
