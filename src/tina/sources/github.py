@@ -81,7 +81,7 @@ class GitHubSource:
         api_base: str | None = None,
     ) -> None:
         if not repo:
-            raise SourceError('github source requires repo = "owner/name" on the workflow')
+            raise SourceError('github source requires repo = "owner/name" on the track')
         self.repo = repo
         self.api_base = (api_base or os.environ.get("GITHUB_API_URL") or API_BASE).rstrip("/")
         self._bot_login = bot_login or os.environ.get("GITHUB_BOT_LOGIN")

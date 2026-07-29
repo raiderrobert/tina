@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import httpx
 
-from tina.config import WorkflowConfig
+from tina.config import TrackConfig
 from tina.sources.base import Source
 from tina.sources.github import GitHubSource
 from tina.sources.jira import JiraSource
@@ -12,10 +12,10 @@ from tina.sources.jira import JiraSource
 __all__ = ["Source", "JiraSource", "GitHubSource", "build"]
 
 
-def build(workflow: WorkflowConfig, client: httpx.Client | None = None) -> Source:
-    """Instantiate the source adapter a workflow declares."""
-    if workflow.source == "jira":
+def build(track: TrackConfig, client: httpx.Client | None = None) -> Source:
+    """Instantiate the source adapter a track declares."""
+    if track.source == "jira":
         return JiraSource(client=client)
-    if workflow.source == "github":
-        return GitHubSource(repo=workflow.repo or "", client=client)
-    raise ValueError(f"unknown source {workflow.source!r}")
+    if track.source == "github":
+        return GitHubSource(repo=track.repo or "", client=client)
+    raise ValueError(f"unknown source {track.source!r}")

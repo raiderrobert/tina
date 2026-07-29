@@ -35,7 +35,7 @@ def main(argv: list[str]) -> int:
     prompt_file, outcome_dir = Path(argv[1]), Path(argv[2])
     prompt = prompt_file.read_text(encoding="utf-8")
     if "Triage" not in prompt:
-        print("the prompt is missing the activity skill", file=sys.stderr)
+        print("the prompt is missing the track skill", file=sys.stderr)
         return 1
 
     api_base = os.environ.get("GITHUB_API_URL", "http://127.0.0.1:8765")

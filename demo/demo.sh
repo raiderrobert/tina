@@ -23,12 +23,12 @@ prompt 'tina --version'
 $TINA --version
 pause
 
-prompt 'tina dispatch --workflow bug --limit 3 --dry-run'
-$TINA dispatch --workflow bug --limit 3 --dry-run
+prompt 'tina dispatch --track bug --limit 3 --dry-run'
+$TINA dispatch --track bug --limit 3 --dry-run
 pause
 
-prompt 'tina run --workflow bug --item 4821'
-$TINA run --workflow bug --item 4821
+prompt 'tina run --track bug --item 4821'
+$TINA run --track bug --item 4821
 pause
 
 prompt 'cat outcome.json'

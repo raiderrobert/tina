@@ -1,11 +1,11 @@
 """TOML configuration.
 
 A config file declares which harness and executor to use, how to invoke each
-harness, and one table per workflow::
+harness, and one table per track::
 
     harness = "pi"
     executor = "local"
-    activities_dir = "activities"
+    tracks_dir = "tracks"
 
     [harnesses.pi]
     command = ["pi", "--prompt-file", "{prompt_file}"]
@@ -13,10 +13,10 @@ harness, and one table per workflow::
     [vul]
     source = "jira"
     query = "project = VUL AND status = Open AND assignee IS EMPTY"
-    activity = "remediate"
+    track = "remediate"
     result = "github:pr"
 
-Every table that is not `harnesses` or `executors` is a workflow, keyed by its
+Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name.
 """
 
@@ -41,8 +41,8 @@ PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir"})
 # and shell brace expansions do not match: they contain quotes, colons, commas.
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 
-# Top-level scalars, as opposed to tables that define adapters or workflows.
-_SCALAR_KEYS = frozenset({"harness", "executor", "activities_dir"})
+# Top-level scalars, as opposed to tables that define adapters or tracks.
+_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
 
@@ -122,15 +122,15 @@ class ExecutorOptions(BaseModel):
     cloudrun: CloudRunOptions | None = None
 
 
-class WorkflowConfig(BaseModel):
-    """One `source -> activity -> result` pipeline."""
+class TrackConfig(BaseModel):
+    """One `source -> skill -> result` pipeline."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
     source: Literal["jira", "github"]
     query: str
-    activity: str
+    track: str
     # A declaration only: the agent produces the result with its own tools.
     result: str | None = None
     # GitHub Issues needs to know which repo the query and claims apply to.
@@ -143,22 +143,20 @@ class Config(BaseModel):
     path: Path
     harness: str
     executor: str = "local"
-    activities_dir: Path = Path("activities")
+    tracks_dir: Path = Path("tracks")
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
     executors: ExecutorOptions = Field(default_factory=ExecutorOptions)
-    workflows: dict[str, WorkflowConfig] = Field(default_factory=dict)
+    tracks: dict[str, TrackConfig] = Field(default_factory=dict)
 
     def harness_config(self) -> HarnessConfig:
         return self.harnesses[self.harness]
 
-    def workflow(self, name: str) -> WorkflowConfig:
+    def track(self, name: str) -> TrackConfig:
         try:
-            return self.workflows[name]
+            return self.tracks[name]
         except KeyError:
-            known = ", ".join(sorted(self.workflows)) or "none"
-            raise ConfigError(
-                f"{self.path}: no workflow named {name!r} (defined: {known})"
-            ) from None
+            known = ", ".join(sorted(self.tracks)) or "none"
+            raise ConfigError(f"{self.path}: no track named {name!r} (defined: {known})") from None
 
     def cloudrun_options(self) -> CloudRunOptions:
         if self.executors.cloudrun is None:
@@ -168,12 +166,12 @@ class Config(BaseModel):
             )
         return self.executors.cloudrun
 
-    def activity_dir(self, workflow: WorkflowConfig) -> Path:
-        """Absolute path of the activity skill, resolved against the config file."""
-        base = self.activities_dir
+    def track_dir(self, track: TrackConfig) -> Path:
+        """Absolute path of the track's skill, resolved against the config file."""
+        base = self.tracks_dir
         if not base.is_absolute():
             base = self.path.parent / base
-        return base / workflow.activity
+        return base / track.track
 
 
 def load(path: Path | str) -> Config:
@@ -209,18 +207,18 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
         for name, table in _tables(raw.get("harnesses", {}), path, "harnesses")
     }
 
-    workflows = {}
+    tracks = {}
     for name, table in raw.items():
         if name in _SCALAR_KEYS or name in _ADAPTER_TABLES:
             continue
         if not isinstance(table, dict):
             raise ConfigError(
                 f"{path}: unexpected top-level key {name!r}; expected one of "
-                f"{', '.join(sorted(_SCALAR_KEYS))} or a workflow table"
+                f"{', '.join(sorted(_SCALAR_KEYS))} or a track table"
             )
-        workflows[name] = _build(
-            WorkflowConfig,
-            {"name": name, "activity": name, **table},
+        tracks[name] = _build(
+            TrackConfig,
+            {"name": name, "track": name, **table},
             path,
             f"[{name}]",
         )
@@ -231,10 +229,10 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
             "path": path,
             "harness": raw["harness"],
             "executor": raw.get("executor", "local"),
-            "activities_dir": raw.get("activities_dir", "activities"),
+            "tracks_dir": raw.get("tracks_dir", "tracks"),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
-            "workflows": workflows,
+            "tracks": tracks,
         },
         path,
         "config",
@@ -277,8 +275,8 @@ def _validate_names(config: Config) -> None:
             f"{config.path}: unknown executor {config.executor!r} "
             f"(supported: {', '.join(EXECUTORS)})"
         )
-    for workflow in config.workflows.values():
-        if workflow.source == "github" and not workflow.repo:
+    for track in config.tracks.values():
+        if track.source == "github" and not track.repo:
             raise ConfigError(
-                f"{config.path}: [{workflow.name}]: source 'github' requires repo = \"owner/name\""
+                f"{config.path}: [{track.name}]: source 'github' requires repo = \"owner/name\""
             )

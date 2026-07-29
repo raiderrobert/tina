@@ -33,7 +33,7 @@ what the factory should do next.
   a prose string. That case never needed a rich type; it needed somewhere to put
   text.
 - `needs_human` separates "this run broke" from "this run correctly concluded a
-  person must decide." The infra branch of the vulnerability activity lives there
+  person must decide." The infra branch of the vulnerability track lives there
   permanently, and it is not an error.
 - `no_action_needed` is the exit for a losing claim race
   ([004](004-worker-side-claiming.md)) as well as for an item that turned out to

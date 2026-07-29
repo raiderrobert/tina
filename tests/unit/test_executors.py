@@ -31,7 +31,7 @@ def test_local_executor_spawns_a_worker(monkeypatch: pytest.MonkeyPatch) -> None
             "-m",
             "tina",
             "run",
-            "--workflow",
+            "--track",
             "vul",
             "--item",
             "VUL-1",

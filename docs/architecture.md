@@ -27,8 +27,8 @@ Code, Gemini CLI, and others are supported through the same adapter contract.
 Tina is a library with a CLI in front of it. Two subcommands:
 
 ```
-tina dispatch --workflow vul --limit 5     # what the scheduler calls
-tina run --workflow vul --item VUL-123     # what the executor spawns; also local dev
+tina dispatch --track vul --limit 5     # what the scheduler calls
+tina run --track vul --item VUL-123     # what the executor spawns; also local dev
 ```
 
 Both subcommands split their output by audience: stdout carries the structured
@@ -49,11 +49,11 @@ pays off when reaction latency matters more than poll latency.
 
 ---
 
-## 4. Workflows
+## 4. Tracks
 
-A workflow is `Source -> Activity -> Result`.
+A track is `Source -> Skill -> Result`.
 
-| Workflow | Source | Activity | Result |
+| Track | Source | Skill | Result |
 |---|---|---|---|
 | Vulnerability | Jira ticket (VUL, open, unassigned) | Remediate | PR linked on ticket, *or* discovery comment on ticket |
 | Bug | Jira ticket filed | Triage | Respond on ticket |
@@ -64,7 +64,7 @@ Reading across the examples:
 
 - **Source** is always a ticket tracker, selected by a query. The tracker varies
   (Jira, Linear, Asana), so the source is an adapter plus a query string.
-- **Activity** is the agent work, expressed as a skill. It is the variable part.
+- **Skill** is the agent work. It is the variable part.
 - **Result** is an artifact in some other system. In most examples the result
   system is not the source system.
 
@@ -72,9 +72,9 @@ The agent produces the result with its own tools. Tina never writes it. So
 `result` is a declaration, not a runtime component — useful for verification and
 for knowing which credentials the image needs.
 
-One activity can produce different results per run: the vulnerability activity
+One track can produce different results per run: the vulnerability track
 ends in a PR link or a discovery comment depending on what it finds. Results are
-not 1:1 with workflows.
+not 1:1 with tracks.
 
 ---
 
@@ -130,7 +130,7 @@ flowchart TB
     subgraph outer["tina"]
         direction TB
         entry["CLI<br/>dispatch · run"]
-        cfg["config<br/>source → activity → result"]
+        cfg["config<br/>source → skill → result"]
         get["get work items"]
         claim["claim it"]
         invoke["invoke agent harness<br/>(one-shot prompt + work item)"]
@@ -139,7 +139,7 @@ flowchart TB
 
     subgraph inner["harness"]
         direction TB
-        prompt["activity skill"]
+        prompt["track skill"]
         classify["classify work item"]
         subA["branch A"]
         subB["branch B"]
@@ -174,12 +174,12 @@ flowchart TB
 
 Two dispatch decisions, at different levels, working differently:
 
-| | Workflow selection | In-activity classification |
+| | Track selection | In-skill classification |
 |---|---|---|
-| **Decides** | which activity handles this queue | which branch handles this item |
-| **Mechanism** | query in config | rules inside the activity's prompt |
+| **Decides** | which track handles this queue | which branch handles this item |
+| **Mechanism** | query in config | rules inside the skill's prompt |
 | **Determinism** | deterministic | agentic |
-| **Owned by** | Tina | the activity |
+| **Owned by** | Tina | the skill |
 | **Auditable by** | reading config | reading the transcript |
 
 ```mermaid
@@ -198,7 +198,7 @@ flowchart LR
 ```
 
 Tina never inspects the content of a work item. It only knows the item matched a
-query. All judgment about what the item actually is happens inside the activity.
+query. All judgment about what the item actually is happens inside the track.
 
 ---
 
@@ -266,9 +266,9 @@ and others come later.
 Tina is an agent runner with a small number of constraints. Today there are two:
 
 1. **One-shot prompt.** No interactive loop. The agent gets the work item and the
-   activity prompt, runs once, exits.
+   track prompt, runs once, exits.
 2. **Container tool surface.** The agent can only do what is installed in the
-   image. Currently one image for all workflows.
+   image. Currently one image for all tracks.
 
 ---
 
@@ -338,7 +338,7 @@ failures not yet observed.
 
 On mismatch, do not overwrite the agent's report. Record `outcome: resolved` plus
 `verified: false`, and flip the effective status to `needs_human`. Preserving the
-claim is what makes it possible to debug an activity that lies.
+claim is what makes it possible to debug a track that lies.
 
 Tina needs read credentials for result systems, which it does not need today.
 They are already in the image for the agent, so this is env reuse rather than new
@@ -351,7 +351,7 @@ secrets plumbing.
 ```toml
 harness = "pi"                  # selects [harnesses.pi]
 executor = "cloudrun"           # selects [executors.cloudrun]
-activities_dir = "activities"   # where napoln installed the skills
+tracks_dir = "tracks"           # where napoln installed the skills
 
 [harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
@@ -364,18 +364,18 @@ job = "tina-worker"
 [vul]
 source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
-activity = "remediate"      # skill under activities_dir; defaults to the key
+track = "remediate"         # skill under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only
 
 [bug]
 source = "github"
 repo = "acme/api"           # required for the github source
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
-activity = "triage"
+track = "triage"
 result = "github:issue-comment"
 ```
 
-Every table that is not `harnesses` or `executors` is a workflow, keyed by its
+Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name. Unknown keys are rejected rather than ignored.
 
 The work implementation this is derived from used a Jira-bound schema:
@@ -386,16 +386,19 @@ track = 'tracks/vul'
 jql = "project = VUL AND status in open and unassgined = TRUE"
 ```
 
-`jql` binds the schema to one tracker. `source` + `query` generalizes it.
+`jql` binds the schema to one tracker. `source` + `query` generalizes it. The
+`track` key survives by name, but the modern one drops the directory prefix:
+`tracks_dir` owns the path, so the value is the bare skill name.
 
 ---
 
-## 16. Activity anatomy
+## 16. Track anatomy
 
-An activity is a skill with a constrained input shape. It may contain multiple
-branches, distinguished by classification rules in its prompt.
+A track pairs a query with a skill. The skill takes a constrained input shape,
+and may contain multiple branches, distinguished by classification rules in its
+prompt.
 
-Example — the vulnerability activity:
+Example — the vulnerability track's skill:
 
 ```mermaid
 flowchart TD
@@ -412,8 +415,8 @@ Three artifacts, of which this repo is one:
 
 ```mermaid
 flowchart LR
-    core["**tina**<br/>OSS, this repo<br/>no activities"]
-    ref["**reference activities**<br/>public, copyable"]
+    core["**tina**<br/>OSS, this repo<br/>no tracks"]
+    ref["**reference tracks**<br/>public, copyable"]
     consumer["**consumer repo**<br/>per-company, private"]
     run["running factory<br/>in company infra"]
 
@@ -424,7 +427,7 @@ flowchart LR
     style core fill:#e8f0fe,stroke:#4285f4
 ```
 
-Activities are installed with [napoln](https://github.com/raiderrobert/napoln),
+Tracks are installed with [napoln](https://github.com/raiderrobert/napoln),
 since they are a kind of skill. **Tina contains no fetching code**: the consumer's
 image build runs `napoln install`, skills land on disk, and Tina reads them from
 a directory. Versioning, pinning, and three-way-merge upgrades are napoln's job.
@@ -444,10 +447,10 @@ a directory. Versioning, pinning, and three-way-merge upgrades are napoln's job.
 | Harnesses | pi (reference), Claude Code |
 | Claiming | worker claims; tracker is the ledger; no persistent state |
 | Verification | generic artifact-URL existence check |
-| Activities | none shipped; installed via napoln |
+| Tracks | none shipped; installed via napoln |
 
 Deferred: REST/webhook entrypoint, `normalize(payload)`, typed result verifiers,
-per-workflow images, stuck-claim sweeper, Linear and Asana adapters, k8s and ECS
+per-track images, stuck-claim sweeper, Linear and Asana adapters, k8s and ECS
 executors.
 
 ---

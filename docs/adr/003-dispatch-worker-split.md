@@ -17,8 +17,8 @@ solves better at the job level.
 Two roles, one image, two CLI subcommands:
 
 ```
-tina dispatch --workflow vul --limit 5     # what the scheduler calls
-tina run --workflow vul --item VUL-123     # what the executor spawns; also local dev
+tina dispatch --track vul --limit 5     # what the scheduler calls
+tina run --track vul --item VUL-123     # what the executor spawns; also local dev
 ```
 
 `dispatch` runs the source query, takes up to N items, and enqueues N worker jobs

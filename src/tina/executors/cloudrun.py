@@ -47,12 +47,12 @@ class CloudRunExecutor:
     def job_path(self) -> str:
         return self.options.job_path()
 
-    def enqueue(self, workflow: str, item_id: str) -> None:
+    def enqueue(self, track: str, item_id: str) -> None:
         run_v2 = _run_v2()
         args = [
             "run",
-            "--workflow",
-            workflow,
+            "--track",
+            track,
             "--item",
             item_id,
             "--config",
@@ -67,7 +67,7 @@ class CloudRunExecutor:
         self.client.run_job(request=request)
         log.info(
             "worker enqueued",
-            extra={"workflow": workflow, "item": item_id, "job": self.job_path},
+            extra={"track": track, "item": item_id, "job": self.job_path},
         )
 
 

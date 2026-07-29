@@ -23,25 +23,25 @@ class LocalExecutor:
     def __init__(self, config_path: Path | str) -> None:
         self.config_path = Path(config_path)
 
-    def enqueue(self, workflow: str, item_id: str) -> None:
+    def enqueue(self, track: str, item_id: str) -> None:
         command = [
             sys.executable,
             "-m",
             "tina",
             "run",
-            "--workflow",
-            workflow,
+            "--track",
+            track,
             "--item",
             item_id,
             "--config",
             str(self.config_path),
         ]
-        log.info("worker starting", extra={"workflow": workflow, "item": item_id})
+        log.info("worker starting", extra={"track": track, "item": item_id})
         try:
             completed = subprocess.run(command, check=False)
         except OSError as exc:
             raise ExecutorError(f"local executor could not start a worker: {exc}") from exc
         log.info(
             "worker finished",
-            extra={"workflow": workflow, "item": item_id, "exit_code": completed.returncode},
+            extra={"track": track, "item": item_id, "exit_code": completed.returncode},
         )

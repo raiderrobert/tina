@@ -11,8 +11,8 @@ from tina.errors import TinaError
 class Executor(Protocol):
     """How the dispatcher enqueues workers. One item = one worker."""
 
-    def enqueue(self, workflow: str, item_id: str) -> None:
-        """Start a `tina run --workflow <workflow> --item <item_id>` worker."""
+    def enqueue(self, track: str, item_id: str) -> None:
+        """Start a `tina run --track <track> --item <item_id>` worker."""
         ...
 
 

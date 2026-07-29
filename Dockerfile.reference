@@ -1,6 +1,6 @@
 # Reference image for a Tina consumer repo. Documentation, not a working build:
 # it is deliberately not buildable as-is, because the parts that vary per
-# company — which harness, which activities, which credentials — are the parts
+# company — which harness, which tracks, which credentials — are the parts
 # you have to fill in.
 #
 # Copy this into your own private repo, replace the marked lines, and build.
@@ -8,8 +8,8 @@
 # One image serves both roles. The dispatcher and the worker are the same
 # binary with different args:
 #
-#   tina dispatch --workflow vul --limit 5
-#   tina run --workflow vul --item VUL-123
+#   tina dispatch --track vul --limit 5
+#   tina run --track vul --item VUL-123
 #
 # FROM python:3.12-slim
 #
@@ -29,17 +29,17 @@
 # # RUN npm install -g @anthropic-ai/claude-code
 #
 # # ---------------------------------------------------------------------------
-# # 3. Activities. Tina contains no fetching code: skills are installed at build
+# # 3. Tracks. Tina contains no fetching code: skills are installed at build
 # #    time with napoln and read off disk at runtime. Versioning, pinning, and
 # #    upgrades are napoln's job.
 # # ---------------------------------------------------------------------------
 # COPY napoln.toml ./
-# RUN uvx napoln install --target /app/activities
+# RUN uvx napoln install --target /app/tracks
 #
 # # ---------------------------------------------------------------------------
 # # 4. The tools the agent needs to produce results. Tina never writes a result;
 # #    the agent does, with its own tools. This is the container tool surface —
-# #    one of Tina's two guardrails — so keep it to what the activities need.
+# #    one of Tina's two guardrails — so keep it to what the tracks need.
 # # ---------------------------------------------------------------------------
 # # RUN apt-get update && apt-get install -y --no-install-recommends git \
 # #     && rm -rf /var/lib/apt/lists/*
@@ -52,4 +52,4 @@
 # COPY tina.toml /app/tina.toml
 #
 # ENTRYPOINT ["tina"]
-# CMD ["dispatch", "--workflow", "vul", "--limit", "5"]
+# CMD ["dispatch", "--track", "vul", "--limit", "5"]

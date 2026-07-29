@@ -40,10 +40,10 @@ so the check is a real check.
 | `demo.sh` | The recorded session — the four commands, echoed then run. |
 | `stub_server.py` | The local GitHub REST API. stdlib only. |
 | `agent.py` | The fake harness: reads the prompt, writes `outcome.json`. |
-| `tina.toml` | The demo workflow: one GitHub source, one fake harness. |
-| `activities/triage/SKILL.md` | Tina ships no activities; this is one to put in the prompt. |
+| `tina.toml` | The demo track: one GitHub source, one fake harness. |
+| `tracks/triage/SKILL.md` | Tina ships no tracks; this is one to put in the prompt. |
 
-`record.sh` copies `tina.toml` and `activities/` into a temporary directory and
+`record.sh` copies `tina.toml` and `tracks/` into a temporary directory and
 records there, so the run leaves nothing behind in the checkout and the session
 needs no `--config` flag on screen.
 

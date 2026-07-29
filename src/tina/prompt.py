@@ -1,6 +1,6 @@
-"""One-shot prompt assembly: activity skill + work item + outcome instructions.
+"""One-shot prompt assembly: track skill + work item + outcome instructions.
 
-Tina ships no activities. They are skills installed with napoln at image build
+Tina ships no tracks. They are skills installed with napoln at image build
 time; Tina only reads them off disk.
 """
 
@@ -15,7 +15,7 @@ SKILL_FILE = "SKILL.md"
 
 
 class PromptError(TinaError, RuntimeError):
-    """The activity skill could not be read."""
+    """The track skill could not be read."""
 
 
 OUTCOME_INSTRUCTIONS = """\
@@ -51,9 +51,9 @@ If this file is missing when you exit, the run is recorded as failed.
 """
 
 
-def build(activity_dir: Path, item: WorkItem, outcome_path: Path) -> str:
+def build(track_dir: Path, item: WorkItem, outcome_path: Path) -> str:
     """Assemble the full prompt handed to the harness."""
-    skill = read_skill(activity_dir)
+    skill = read_skill(track_dir)
     return "\n".join(
         [
             skill.rstrip(),
@@ -71,16 +71,15 @@ def build(activity_dir: Path, item: WorkItem, outcome_path: Path) -> str:
     )
 
 
-def read_skill(activity_dir: Path) -> str:
-    """Read `<activity_dir>/SKILL.md`."""
-    path = activity_dir / SKILL_FILE
+def read_skill(track_dir: Path) -> str:
+    """Read `<track_dir>/SKILL.md`."""
+    path = track_dir / SKILL_FILE
     try:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise PromptError(
-            f"activity skill not found at {path}",
-            fix="Activities are installed into the activities directory with"
-            " napoln; tina ships none.",
+            f"track skill not found at {path}",
+            fix="Tracks are installed into the tracks directory with napoln; tina ships none.",
         ) from None
     except OSError as exc:
-        raise PromptError(f"could not read activity skill at {path}: {exc}") from exc
+        raise PromptError(f"could not read track skill at {path}: {exc}") from exc

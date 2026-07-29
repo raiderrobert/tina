@@ -17,7 +17,7 @@ class Source(Protocol):
     """A ticket tracker, seen through a query and a claim.
 
     Tina never inspects the content of a work item — it only knows the item
-    matched a query. All judgment about what the item is happens in the activity.
+    matched a query. All judgment about what the item is happens in the track.
     """
 
     def query(self, q: str) -> list[WorkItem]:

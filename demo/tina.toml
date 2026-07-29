@@ -4,7 +4,7 @@
 
 harness = "demo"
 executor = "local"
-activities_dir = "activities"
+tracks_dir = "tracks"
 
 # `record.sh` puts demo/ on PYTHONPATH, so `-m agent` resolves to demo/agent.py
 # no matter which directory the run happens in -- the harness runs with its cwd
@@ -16,5 +16,5 @@ command = ["python3", "-m", "agent", "{prompt_file}", "{outcome_dir}"]
 source = "github"
 repo = "acme/api"
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
-activity = "triage"
+track = "triage"
 result = "github:pr"

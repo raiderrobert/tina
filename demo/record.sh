@@ -77,7 +77,7 @@ export TINA
 # found by default, `cat outcome.json` needs no path, and the checkout stays
 # clean.
 cp "$DEMO_DIR/tina.toml" "$WORK/tina.toml"
-cp -R "$DEMO_DIR/activities" "$WORK/activities"
+cp -R "$DEMO_DIR/tracks" "$WORK/tracks"
 cd "$WORK"
 
 asciinema rec --overwrite --quiet --headless --return \

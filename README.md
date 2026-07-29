@@ -16,7 +16,7 @@ does all the performance, using its own tools.
 
 ## How it works
 
-A workflow is `Source -> Activity -> Result`.
+A track is `Source -> Skill -> Result`.
 
 ```toml
 harness = "pi"        # selects [harnesses.pi]; `executor` works the same way
@@ -29,16 +29,16 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 source = "github"
 repo = "acme/api"
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
-activity = "triage"
+track = "triage"
 result = "github:issue-comment"
 ```
 
 Two commands, one image:
 
 ```bash
-tina dispatch --workflow bug --limit 5             # query, take N, enqueue N workers
-tina dispatch --workflow bug --limit 5 --dry-run   # preview the matches, enqueue nothing
-tina run --workflow bug --item 4821                # claim, run the agent, record outcome
+tina dispatch --track bug --limit 5             # query, take N, enqueue N workers
+tina dispatch --track bug --limit 5 --dry-run   # preview the matches, enqueue nothing
+tina run --track bug --item 4821                # claim, run the agent, record outcome
 ```
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud
@@ -54,14 +54,14 @@ without Tina knowing about them.
   provides.
 - **No persistent state.** The tracker is the ledger. Workers claim items, and
   claimed items drop out of the query.
-- **No activities included.** Activities are skills, installed with
+- **No tracks included.** Tracks are skills, installed with
   [napoln](https://github.com/raiderrobert/napoln) at image build time.
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [docs/architecture.md](docs/architecture.md) | System design — workflows, dispatch/worker, adapters, outcome contract, v1 scope |
+| [docs/architecture.md](docs/architecture.md) | System design — tracks, dispatch/worker, adapters, outcome contract, v1 scope |
 | [docs/adr/](docs/adr/) | Architecture decision records — the reasoning behind each design choice |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the check loop, layout, how to add adapters, commit conventions |
 

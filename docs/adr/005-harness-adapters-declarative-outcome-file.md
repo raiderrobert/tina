@@ -39,8 +39,8 @@ fallback for "the agent died before writing."
 ## Consequences
 
 - Adding a harness is a config entry, not a release.
-- The contract moves from the harness to the activity: the agent must be told to
-  write the file, and an activity that ignores the instruction produces a missing
+- The contract moves from the harness to the track: the agent must be told to
+  write the file, and a track that ignores the instruction produces a missing
   outcome.
 - A missing `outcome.json` is indistinguishable from a crash. Both resolve to
   `failed` via exit code, which is the correct answer in either case.

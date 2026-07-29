@@ -28,7 +28,7 @@ Typed per-`kind` verifiers are deferred.
 - The dominant failure is caught for very little code, without tripling the v1
   adapter surface to catch failures not yet observed.
 - Preserving the agent's original claim alongside `verified: false` is what makes
-  it possible to debug an activity that lies. Overwriting would destroy the
+  it possible to debug a track that lies. Overwriting would destroy the
   evidence.
 - A URL that exists but points at an empty or wrong-target PR passes. That is the
   accepted gap until typed verifiers land.

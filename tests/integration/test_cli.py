@@ -28,7 +28,7 @@ runner = CliRunner()
 
 CONFIG = """
 harness = "fake"
-activities_dir = "activities"
+tracks_dir = "tracks"
 
 [harnesses.fake]
 command = ["{python}", "{script}", "{{prompt_file}}", "{{outcome_dir}}"]
@@ -36,7 +36,7 @@ command = ["{python}", "{script}", "{{prompt_file}}", "{{outcome_dir}}"]
 [vul]
 source = "jira"
 query = "project = VUL"
-activity = "remediate"
+track = "remediate"
 result = "github:pr"
 """
 
@@ -45,7 +45,7 @@ AGENT = """\
 import pathlib, sys
 prompt = pathlib.Path(sys.argv[1]).read_text()
 outcome = pathlib.Path(__file__).with_name("outcome_to_write.json").read_text()
-assert "Remediate the vulnerability" in prompt, "activity skill missing from prompt"
+assert "Remediate the vulnerability" in prompt, "track skill missing from prompt"
 assert "VUL-1" in prompt, "work item missing from prompt"
 pathlib.Path(sys.argv[2], "outcome.json").write_text(outcome)
 """
@@ -75,15 +75,15 @@ class FakeExecutor:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
 
-    def enqueue(self, workflow: str, item_id: str) -> None:
-        self.enqueued.append((workflow, item_id))
+    def enqueue(self, track: str, item_id: str) -> None:
+        self.enqueued.append((track, item_id))
 
 
 @pytest.fixture
 def records() -> Iterator[io.StringIO]:
     """The JSON log lines the entrypoint functions emit, collected in memory.
 
-    The typer commands call `log.configure()` themselves; `dispatch_workflow`
+    The typer commands call `log.configure()` themselves; `dispatch_track`
     and `run_item` do not, so tests that skip the command layer install the same
     formatter here.
     """
@@ -115,16 +115,16 @@ def offline_verify(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    """A config, an activity skill, and a fake harness on disk."""
+    """A config, a track skill, and a fake harness on disk."""
     script = tmp_path / "agent.py"
     script.write_text(AGENT)
     (script.parent / "outcome_to_write.json").write_text(
         json.dumps({"outcome": "no_action_needed", "details": "nothing to do"})
     )
 
-    activity = tmp_path / "activities" / "remediate"
-    activity.mkdir(parents=True)
-    (activity / "SKILL.md").write_text("# Remediate the vulnerability\n")
+    track = tmp_path / "tracks" / "remediate"
+    track.mkdir(parents=True)
+    (track / "SKILL.md").write_text("# Remediate the vulnerability\n")
 
     path = tmp_path / "tina.toml"
     path.write_text(CONFIG.format(python=sys.executable, script=script))
@@ -136,7 +136,7 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeSource, FakeExecutor]:
     """Point the adapter factories at fakes, so the real argv path can be driven."""
     source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
     executor = FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda workflow, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
     return source, executor
 
@@ -241,7 +241,7 @@ def test_dispatch_defaults_to_one_worker_and_tina_toml(
 ) -> None:
     _, executor = wired
 
-    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
 
     assert result.exit_code == 0
     assert executor.enqueued == [("vul", "VUL-1")], "--limit defaults to 1"
@@ -252,7 +252,7 @@ def test_config_defaults_to_tina_toml_in_the_cwd(
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
-    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul"])
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul"])
 
     assert result.exit_code == 1
     assert "tina.toml" in last_record(result.output)["message"]
@@ -262,7 +262,7 @@ def test_limit_is_passed_through(project: Path, wired: tuple[FakeSource, FakeExe
     _, executor = wired
 
     result = runner.invoke(
-        cli.app, ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project)]
+        cli.app, ["dispatch", "--track", "vul", "--limit", "2", "--config", str(project)]
     )
 
     assert result.exit_code == 0
@@ -276,7 +276,7 @@ def test_run_exits_zero_when_the_agent_reports_failed(
     outcome_written(project, {"outcome": "failed", "details": "no credentials for the repo"})
 
     result = runner.invoke(
-        cli.app, ["run", "--workflow", "vul", "--item", "VUL-1", "--config", str(project)]
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
     )
 
     assert result.exit_code == 0
@@ -284,27 +284,27 @@ def test_run_exits_zero_when_the_agent_reports_failed(
 
 
 def test_missing_required_option_is_a_usage_error(project: Path) -> None:
-    result = runner.invoke(cli.app, ["run", "--workflow", "vul", "--config", str(project)])
+    result = runner.invoke(cli.app, ["run", "--track", "vul", "--config", str(project)])
 
     assert result.exit_code == 2, "typer reports a usage error, not a tina error"
 
 
 def test_reports_a_bad_config() -> None:
     result = runner.invoke(
-        cli.app, ["dispatch", "--workflow", "vul", "--config", "/nonexistent/tina.toml"]
+        cli.app, ["dispatch", "--track", "vul", "--config", "/nonexistent/tina.toml"]
     )
 
     assert result.exit_code == 1
     assert "not found" in last_record(result.output)["message"]
 
 
-def test_reports_an_unknown_workflow(project: Path) -> None:
+def test_reports_an_unknown_track(project: Path) -> None:
     result = runner.invoke(
-        cli.app, ["run", "--workflow", "bug", "--item", "1", "--config", str(project)]
+        cli.app, ["run", "--track", "bug", "--item", "1", "--config", str(project)]
     )
 
     assert result.exit_code == 1
-    assert "no workflow named 'bug'" in last_record(result.output)["message"]
+    assert "no track named 'bug'" in last_record(result.output)["message"]
 
 
 # --- both halves of the stdout/stderr boundary ------------------------------
@@ -315,7 +315,7 @@ def test_a_toml_typo_reports_on_both_streams(tmp_path: Path) -> None:
     path = tmp_path / "tina.toml"
     path.write_text('harness = "pi"\n\n[harness.pi]\ncommand = ["pi"]\n')
 
-    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(path)])
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(path)])
 
     assert result.exit_code == 1
     assert "invalid TOML" in last_record(result.stdout)["message"]
@@ -332,7 +332,7 @@ def test_a_missing_env_var_reports_on_both_streams(
     for name in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
         monkeypatch.delenv(name, raising=False)
 
-    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
 
     assert result.exit_code == 1
     assert "JIRA_BASE_URL" in last_record(result.stdout)["message"]
@@ -346,7 +346,7 @@ def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
     source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
     executor = FakeExecutor()
 
-    cli.dispatch_workflow(config.load(project), "vul", 2, source=source, executor=executor)
+    cli.dispatch_track(config.load(project), "vul", 2, source=source, executor=executor)
 
     assert source.queried == "project = VUL"
     assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
@@ -356,7 +356,7 @@ def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
 def test_dispatch_with_no_matches_enqueues_nothing(project: Path) -> None:
     executor = FakeExecutor()
 
-    cli.dispatch_workflow(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
+    cli.dispatch_track(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
 
     assert executor.enqueued == []
 
@@ -369,7 +369,7 @@ def test_a_dry_run_enqueues_nothing(project: Path, wired: tuple[FakeSource, Fake
     source, executor = wired
 
     result = runner.invoke(
-        cli.app, ["dispatch", "--workflow", "vul", "--config", str(project), "--dry-run"]
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
     )
 
     assert result.exit_code == 0
@@ -393,7 +393,7 @@ def test_a_dry_run_builds_no_executor(
     monkeypatch.setattr(executors, "build", fail)
 
     result = runner.invoke(
-        cli.app, ["dispatch", "--workflow", "vul", "--config", str(project), "--dry-run"]
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
     )
 
     assert result.exception is None
@@ -406,7 +406,7 @@ def test_a_dry_run_respects_the_limit(
     """--limit 2 against three items previews two."""
     result = runner.invoke(
         cli.app,
-        ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
+        ["dispatch", "--track", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
     )
 
     previewed = [
@@ -421,12 +421,12 @@ def test_a_dry_run_with_no_matches_exits_zero(
 ) -> None:
     """Zero matches is a valid preview, not an error."""
     source, executor = FakeSource([]), FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda workflow, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
 
     result = runner.invoke(
         cli.app,
-        ["dispatch", "--workflow", "vul", "--limit", "5", "--config", str(project), "--dry-run"],
+        ["dispatch", "--track", "vul", "--limit", "5", "--config", str(project), "--dry-run"],
     )
 
     lines = json_lines(result.stdout)
@@ -442,7 +442,7 @@ def test_the_would_enqueue_line_keeps_the_enqueued_schema(
     project: Path, wired: tuple[FakeSource, FakeExecutor]
 ) -> None:
     """Same fields as `enqueued`, plus the marker; a different message on purpose."""
-    argv = ["dispatch", "--workflow", "vul", "--config", str(project)]
+    argv = ["dispatch", "--track", "vul", "--config", str(project)]
     real = json_lines(runner.invoke(cli.app, argv).stdout)
     preview = json_lines(runner.invoke(cli.app, [*argv, "--dry-run"]).stdout)
 
@@ -456,7 +456,7 @@ def test_the_would_enqueue_line_keeps_the_enqueued_schema(
         "level",
         "logger",
         "message",
-        "workflow",
+        "track",
         "item",
         "url",
         "executor",
@@ -473,7 +473,7 @@ def test_a_normal_dispatch_emits_no_dry_run_key(
     project: Path, wired: tuple[FakeSource, FakeExecutor]
 ) -> None:
     """The marker is present only when the flag is."""
-    result = runner.invoke(cli.app, ["dispatch", "--workflow", "vul", "--config", str(project)])
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
 
     assert result.exit_code == 0
     assert all("dry_run" not in line for line in json_lines(result.stdout))
@@ -486,7 +486,7 @@ def test_the_dry_run_preview_lands_on_stderr(
     """Header, one line per match in order, tally, footer — and none of it on stdout."""
     result = runner.invoke(
         cli.app,
-        ["dispatch", "--workflow", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
+        ["dispatch", "--track", "vul", "--limit", "2", "--config", str(project), "--dry-run"],
     )
 
     assert result.exit_code == 0
@@ -507,7 +507,7 @@ def test_a_dry_run_drops_an_empty_title(project: Path, capsys: pytest.CaptureFix
     """No title, no dangling dash."""
     source = FakeSource([WorkItem(id="VUL-9", source="jira")])
 
-    cli.dispatch_workflow(config.load(project), "vul", 1, source=source, dry_run=True)
+    cli.dispatch_track(config.load(project), "vul", 1, source=source, dry_run=True)
 
     err = plain(capsys.readouterr().err)
     assert "  Would enqueue VUL-9 via local\n" in err
@@ -536,7 +536,7 @@ def test_run_invokes_the_agent_and_records_the_outcome(project: Path, records: i
 
     record = last_record(records.getvalue())
     assert source.claimed == ["VUL-1"]
-    assert record["workflow"] == "vul"
+    assert record["track"] == "vul"
     assert record["item"] == "VUL-1"
     assert record["report"]["outcome"] == "resolved"
     assert record["report"]["details"] == "opened a PR"

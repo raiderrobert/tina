@@ -18,7 +18,7 @@ class WorkItem(BaseModel):
     # None rather than "" — a tracker that returned no link has no link, and an
     # empty string is not a URL.
     url: AnyHttpUrl | None = None
-    # The untouched tracker payload, so an activity can reach fields Tina does
+    # The untouched tracker payload, so a track can reach fields Tina does
     # not model. Deliberately unvalidated: this is the escape hatch.
     raw: dict[str, Any] = Field(default_factory=dict)
 
@@ -64,7 +64,7 @@ class OutcomeReport(BaseModel):
 class RunRecord(BaseModel):
     """The final log line of `tina run`."""
 
-    workflow: str
+    track: str
     item: str
     report: OutcomeReport
     effective_status: OutcomeStatus
@@ -74,14 +74,14 @@ class RunRecord(BaseModel):
     @classmethod
     def build(
         cls,
-        workflow: str,
+        track: str,
         item: str,
         report: OutcomeReport,
         exit_code: int | None,
         duration_seconds: float,
     ) -> RunRecord:
         return cls(
-            workflow=workflow,
+            track=track,
             item=item,
             report=report,
             effective_status=report.effective_status,
