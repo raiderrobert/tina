@@ -55,6 +55,7 @@ without Tina knowing about them.
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | System design — workflows, dispatch/worker, adapters, outcome contract, v1 scope |
+| [docs/adr/](docs/adr/) | Architecture decision records — the reasoning behind each design choice |
 
 ## Status
 
