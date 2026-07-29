@@ -12,6 +12,8 @@ It is an agent harness with guardrails. Tina does orchestration only: it selects
 a work item, claims it, and calls an agent once with a one-shot prompt. The agent
 does all the performance, using its own tools.
 
+![tina demo](tina-demo.gif)
+
 ## How it works
 
 A workflow is `Source -> Activity -> Result`.
