@@ -1,0 +1,55 @@
+# Reference image for a Tina consumer repo. Documentation, not a working build:
+# it is deliberately not buildable as-is, because the parts that vary per
+# company — which harness, which activities, which credentials — are the parts
+# you have to fill in.
+#
+# Copy this into your own private repo, replace the marked lines, and build.
+#
+# One image serves both roles. The dispatcher and the worker are the same
+# binary with different args:
+#
+#   tina dispatch --workflow vul --limit 5
+#   tina run --workflow vul --item VUL-123
+#
+# FROM python:3.12-slim
+#
+# # ---------------------------------------------------------------------------
+# # 1. Tina itself.
+# # ---------------------------------------------------------------------------
+# # Add the [cloudrun] extra only if the dispatcher enqueues Cloud Run jobs.
+# RUN pip install --no-cache-dir "tina @ git+https://github.com/raiderrobert/tina@v0.1.0"
+# # RUN pip install --no-cache-dir "tina[cloudrun] @ git+https://github.com/..."
+#
+# # ---------------------------------------------------------------------------
+# # 2. The agent harness. Tina does not ship one — it shells out to whatever the
+# #    config names. Install exactly one, and make sure its argv matches the
+# #    [harnesses.<name>] command in tina.toml.
+# # ---------------------------------------------------------------------------
+# # RUN pip install --no-cache-dir pi
+# # RUN npm install -g @anthropic-ai/claude-code
+#
+# # ---------------------------------------------------------------------------
+# # 3. Activities. Tina contains no fetching code: skills are installed at build
+# #    time with napoln and read off disk at runtime. Versioning, pinning, and
+# #    upgrades are napoln's job.
+# # ---------------------------------------------------------------------------
+# COPY napoln.toml ./
+# RUN uvx napoln install --target /app/activities
+#
+# # ---------------------------------------------------------------------------
+# # 4. The tools the agent needs to produce results. Tina never writes a result;
+# #    the agent does, with its own tools. This is the container tool surface —
+# #    one of Tina's two guardrails — so keep it to what the activities need.
+# # ---------------------------------------------------------------------------
+# # RUN apt-get update && apt-get install -y --no-install-recommends git \
+# #     && rm -rf /var/lib/apt/lists/*
+#
+# # ---------------------------------------------------------------------------
+# # 5. Configuration. Credentials come from the environment at run time (see
+# #    .env.example) — never bake them into the image.
+# # ---------------------------------------------------------------------------
+# WORKDIR /app
+# COPY tina.toml /app/tina.toml
+#
+# ENTRYPOINT ["tina"]
+# CMD ["dispatch", "--workflow", "vul", "--limit", "5"]

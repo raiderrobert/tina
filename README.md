@@ -67,7 +67,7 @@ Design stage. v1 scope is §18 of the architecture doc.
 uv sync              # Install all dependencies
 uv run pytest        # Run tests
 uv run ruff check    # Lint
-uv run mypy          # Type check
+uv run ty check      # Type check
 ```
 
 ## License
