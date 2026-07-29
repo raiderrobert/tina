@@ -5,6 +5,7 @@ import importlib.metadata
 import io
 import json
 import logging
+import re
 import sys
 from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError
@@ -158,27 +159,39 @@ def items(*ids: str) -> list[WorkItem]:
 # --- the command layer: argv, defaults, exit codes -------------------------
 
 
+def plain(output: str) -> str:
+    """CLI output with rich's ANSI styling stripped.
+
+    CI sets `GITHUB_ACTIONS`, which rich reads as "this is a terminal", so help
+    text comes back styled there but not locally. Rich emits an option name as
+    two adjacent spans — `--version` renders as
+    `\\x1b[1;36m-\\x1b[0m\\x1b[1;36m-version\\x1b[0m` — so the flag is not a
+    substring of the raw output. Strip the escapes before asserting on it.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+
 def test_help_lists_both_roles() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    assert "dispatch" in result.output
-    assert "run" in result.output
+    assert "dispatch" in plain(result.output)
+    assert "run" in plain(result.output)
 
 
 def test_help_lists_the_version_flag() -> None:
     result = runner.invoke(cli.app, ["--help"])
 
     assert result.exit_code == 0
-    assert "--version" in result.output
+    assert "--version" in plain(result.output)
 
 
 def test_no_arguments_still_prints_help() -> None:
     """`no_args_is_help=True` survives the new callback."""
     result = runner.invoke(cli.app, [])
 
-    assert "dispatch" in result.output
-    assert "run" in result.output
+    assert "dispatch" in plain(result.output)
+    assert "run" in plain(result.output)
 
 
 def test_version_prints_the_package_version() -> None:
