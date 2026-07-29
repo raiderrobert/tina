@@ -18,12 +18,18 @@ rots.
 Harness adapters are subprocess configs templated in TOML, not code plugins:
 
 ```toml
-[harness.pi]
+harness = "pi"
+
+[harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
 
-[harness.claude]
+[harnesses.claude]
 command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
 ```
+
+Singular `harness` selects which one runs; plural `[harnesses.<name>]` defines
+them. They cannot share a name — TOML forbids a key that is both a string and a
+table.
 
 **Tina does not parse harness stdout.** Tina passes an output path in the prompt
 and instructs the agent to write `outcome.json` there before finishing. Every

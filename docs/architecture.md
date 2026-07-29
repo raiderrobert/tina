@@ -274,12 +274,18 @@ runs a subprocess, and collects the result — small enough to be declarative
 config rather than a code plugin:
 
 ```toml
-[harness.pi]
+harness = "pi"                  # which one to use
+
+[harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
 
-[harness.claude]
+[harnesses.claude]
 command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
 ```
+
+Singular `harness` selects; plural `[harnesses.<name>]` defines. TOML will not let
+one key be both a string and a table, so the two cannot share a name. `executor`
+and `[executors.<name>]` work the same way.
 
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
@@ -338,21 +344,34 @@ secrets plumbing.
 ## 15. Configuration
 
 ```toml
-harness = "pi"
-executor = "cloudrun"
+harness = "pi"                  # selects [harnesses.pi]
+executor = "cloudrun"           # selects [executors.cloudrun]
+activities_dir = "activities"   # where napoln installed the skills
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+[executors.cloudrun]
+project = "acme-prod"
+region = "us-central1"
+job = "tina-worker"
 
 [vul]
 source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
-activity = "remediate"      # skill name; defaults to key
+activity = "remediate"      # skill under activities_dir; defaults to the key
 result = "github:pr"        # declaration only
 
 [bug]
 source = "github"
+repo = "acme/api"           # required for the github source
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
 activity = "triage"
 result = "github:issue-comment"
 ```
+
+Every table that is not `harnesses` or `executors` is a workflow, keyed by its
+table name. Unknown keys are rejected rather than ignored.
 
 The work implementation this is derived from used a Jira-bound schema:
 

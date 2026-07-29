@@ -17,8 +17,11 @@ does all the performance, using its own tools.
 A workflow is `Source -> Activity -> Result`.
 
 ```toml
-harness = "pi"
-executor = "cloudrun"
+harness = "pi"        # selects [harnesses.pi]; `executor` works the same way
+executor = "local"
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
 
 [vul]
 source = "jira"
