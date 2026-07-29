@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -6,4 +7,19 @@ build/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+
+# Local environment
 .env
+
+# Agents and worktrees
+.claude/
+.worktrees/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
