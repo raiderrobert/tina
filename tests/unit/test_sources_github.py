@@ -89,6 +89,28 @@ def test_claim_fails_when_the_add_did_not_land(item: WorkItem) -> None:
     assert source(handler).claim(item) is False
 
 
+def test_claim_prognosis_reports_the_holder_without_writing(item: WorkItem) -> None:
+    """Unlike Jira, the bot already holding it alone is a claim that would succeed."""
+    calls: list[str] = []
+
+    def responder(assignees: list[str]):
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.method)
+            assert request.method == "GET", "claim_prognosis must never write"
+            return httpx.Response(200, json=issue(assignees=assignees))
+
+        return handler
+
+    free = source(responder([])).claim_prognosis(item)
+    ours = source(responder([BOT])).claim_prognosis(item)
+    theirs = source(responder(["alice", "bob"])).claim_prognosis(item)
+
+    assert (free.would_claim, free.holder) == (True, "")
+    assert (ours.would_claim, ours.holder) == (True, BOT)
+    assert (theirs.would_claim, theirs.holder) == (False, "alice, bob")
+    assert calls == ["GET", "GET", "GET"], "one read each, and nothing else"
+
+
 def test_bot_login_is_looked_up_when_unset(item: WorkItem) -> None:
     paths: list[str] = []
 

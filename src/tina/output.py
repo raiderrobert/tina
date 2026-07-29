@@ -28,9 +28,13 @@ def error(message: str, cause: str = "", fix: str = "") -> None:
         typer.echo(typer.style("  Fix:   ", fg=DIM) + fix, err=True)
 
 
-def dry_run_header() -> None:
-    """Open a preview. Nothing printed after this line changed anything."""
-    typer.echo(typer.style("Dry run", fg=DRY_RUN) + " — no workers will be enqueued\n", err=True)
+def dry_run_header(skipped: str = "no workers will be enqueued") -> None:
+    """Open a preview. Nothing printed after this line changed anything.
+
+    `skipped` names what this particular preview is not doing; the default is
+    dispatch's, so its header is unchanged to the byte.
+    """
+    typer.echo(typer.style("Dry run", fg=DRY_RUN) + f" — {skipped}\n", err=True)
 
 
 def would(message: str) -> None:
@@ -38,14 +42,15 @@ def would(message: str) -> None:
     typer.echo("  " + message, err=True)
 
 
-def dry_run_footer(summary: str = "") -> None:
+def dry_run_footer(summary: str = "", action: str = "enqueue") -> None:
     """Close a preview, with an optional tally.
 
     `summary` is omitted when empty, the same way `error()` drops an empty
     `Cause:`/`Fix:` rather than printing a label with nothing after it.
+    `action` completes "Run without --dry-run to …"; the default is dispatch's.
     """
     typer.echo("", err=True)
     if summary:
         typer.echo(summary, err=True)
         typer.echo("", err=True)
-    typer.echo(typer.style("Run without --dry-run to enqueue.", fg=DIM), err=True)
+    typer.echo(typer.style(f"Run without --dry-run to {action}.", fg=DIM), err=True)

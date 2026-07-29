@@ -15,7 +15,7 @@ import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 from tina.models import WorkItem
-from tina.sources.base import SourceError, parse_payload, require_env
+from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
 
 API_BASE = "https://api.github.com"
 SEARCH_PATH = "/search/issues"
@@ -121,6 +121,20 @@ class GitHubSource:
             json={"assignees": [self.bot_login]},
         )
         return self._issue(number).logins == [self.bot_login]
+
+    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
+        """The re-read half of `claim`, with the `POST` that precedes it left off.
+
+        Assignment is an idempotent add, so the bot already holding the issue
+        alone is a claim that would succeed — the opposite of Jira, where any
+        assignee refuses. `bot_login` may cost a `GET /user`; still no write.
+        """
+        logins = self._issue(_number(item.id)).logins
+        if not logins:
+            return ClaimPrognosis(would_claim=True, holder="")
+        if logins == [self.bot_login]:
+            return ClaimPrognosis(would_claim=True, holder=self.bot_login)
+        return ClaimPrognosis(would_claim=False, holder=", ".join(logins))
 
     def _issue(self, number: str) -> Issue:
         path = f"/repos/{self.repo}/issues/{number}"

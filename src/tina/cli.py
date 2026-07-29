@@ -8,12 +8,13 @@ a source or executor.
 
 from __future__ import annotations
 
+import shlex
 import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -88,10 +89,17 @@ def run(
     track: TrackOption,
     item: Annotated[str, typer.Option("--item", help="Tracker identifier of the work item.")],
     config: ConfigOption = DEFAULT_CONFIG,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Preview the run without claiming the item or running the agent.",
+        ),
+    ] = False,
 ) -> None:
     """Claim one work item, run the agent, record the outcome."""
     with _exit_on_tina_error("run"):
-        run_item(load_config(config), track, item)
+        run_item(load_config(config), track, item, dry_run=dry_run)
 
 
 @contextmanager
@@ -192,18 +200,28 @@ def run_item(
     track_name: str,
     item_id: str,
     source: Source | None = None,
-) -> RunRecord:
+    dry_run: bool = False,
+) -> RunRecord | None:
     """Claim one item, run the agent once, verify, record.
 
     Returns the record it logged. Every agent outcome is a successful run — the
     outcome is data, not a process failure — so this never signals via an
     exception unless Tina itself broke.
+
+    `dry_run` returns `None`, because a preview produced no run and there is no
+    record to hand back. The prefix up to the claim is executed for real, so
+    the preview's fidelity comes from doing the read-only work rather than
+    from describing it.
     """
     started = time.monotonic()
     track = config.track(track_name)
     source = source or sources.build(track)
 
     item = source.get(item_id)
+    if dry_run:
+        _preview_run(config, track, source, item, started)
+        return None
+
     if not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
         return _record(
@@ -225,6 +243,76 @@ def run_item(
 
     report = verify.verify(result.report)
     return _record(track.name, item.id, report, result.exit_code, started)
+
+
+def _preview_run(
+    config: Config,
+    track: TrackConfig,
+    source: Source,
+    item: WorkItem,
+    started: float,
+) -> None:
+    """The dry-run half of `run_item`: the real read-only prefix, then a plan.
+
+    It stops exactly where the real run stops. When the claim would not
+    proceed there is nothing after it to describe, so the preview ends at the
+    claim rather than narrating steps that would never happen.
+
+    The message is `would run`, never `run complete`, so a collector filtering
+    on `message` can never count a preview as a run. The `dry_run` marker is
+    added only here, so a normal run carries no such key at all.
+    """
+    prognosis = source.claim_prognosis(item)
+    fields: dict[str, Any] = {
+        "dry_run": True,
+        "track": track.name,
+        "item": item.id,
+        "would_claim": prognosis.would_claim,
+        "holder": prognosis.holder,
+    }
+
+    output.dry_run_header("nothing will be claimed and no agent will run")
+    if prognosis.would_claim:
+        held = f"held by {prognosis.holder}" if prognosis.holder else "unassigned"
+        output.would(f"Would claim {item.id} — {held}")
+        fields |= _preview_prompt(config, track, item)
+    else:
+        output.would(
+            f"Would not claim {item.id} — held by {prognosis.holder};"
+            f" the run would exit {OutcomeStatus.NO_ACTION_NEEDED}"
+        )
+        fields["effective_status"] = OutcomeStatus.NO_ACTION_NEEDED
+    output.dry_run_footer(action=f"claim {item.id} and run the agent")
+
+    fields["duration_seconds"] = round(time.monotonic() - started, 3)
+    logger.info("would run", extra=fields)
+
+
+def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[str, Any]:
+    """Assemble the genuine prompt and render the genuine command.
+
+    The workdir is a real one that outlives the process — a printed command
+    naming a prompt file that was deleted on the way out would not be runnable,
+    and being runnable is the point. It is the only thing a dry run writes, and
+    it lands in the OS temp dir. Real runs keep their auto-cleaned
+    `TemporaryDirectory`.
+    """
+    harness_config = config.harness_config()
+    workdir = Path(tempfile.mkdtemp(prefix="tina-"))
+    text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
+    prompt_file = harness.write_prompt(text, workdir)
+    command = harness_config.command.render(prompt_file, workdir)
+
+    output.would(f"Prompt assembled: {prompt_file} ({len(text)} chars)")
+    output.would(f"Would run: {shlex.join(command)}")
+    output.would("Would verify artifacts and record the outcome from the agent's outcome.json")
+
+    return {
+        "harness": harness_config.name,
+        "command": command,
+        "prompt_file": str(prompt_file),
+        "prompt_chars": len(text),
+    }
 
 
 def _record(

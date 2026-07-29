@@ -103,6 +103,28 @@ def test_claim_fails_when_the_write_did_not_stick(work_item: WorkItem) -> None:
     assert source(handler).claim(work_item) is False
 
 
+def test_claim_prognosis_reports_the_holder_without_writing(work_item: WorkItem) -> None:
+    """The verdict comes from a read. A write here would be the bug it exists to avoid."""
+    calls: list[str] = []
+
+    def held(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(assignee={"accountId": "someone-else"}))
+
+    def free(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(assignee=None))
+
+    taken = source(held).claim_prognosis(work_item)
+    unheld = source(free).claim_prognosis(work_item)
+
+    assert (taken.would_claim, taken.holder) == (False, "someone-else")
+    assert (unheld.would_claim, unheld.holder) == (True, "")
+    assert calls == ["GET", "GET"], "one read each, and nothing else"
+
+
 def test_http_error_is_a_source_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, text="forbidden")

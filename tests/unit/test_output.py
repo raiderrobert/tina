@@ -113,3 +113,33 @@ def test_the_dry_run_preview_goes_to_stderr_only(capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err != ""
+
+
+def test_the_dry_run_frame_takes_the_run_preview_text(capsys: pytest.CaptureFixture[str]) -> None:
+    """`tina run --dry-run` skips different things and offers a different next step."""
+    output.dry_run_header("nothing will be claimed and no agent will run")
+    output.would("Would claim VUL-1 — unassigned")
+    output.dry_run_footer(action="claim VUL-1 and run the agent")
+
+    assert plain(capsys.readouterr().err).splitlines() == [
+        "Dry run — nothing will be claimed and no agent will run",
+        "",
+        "  Would claim VUL-1 — unassigned",
+        "",
+        "Run without --dry-run to claim VUL-1 and run the agent.",
+    ]
+
+
+def test_the_dry_run_frame_defaults_to_the_dispatch_text(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """dispatch passes neither parameter, so its preview is unchanged to the byte."""
+    output.dry_run_header()
+    output.dry_run_footer()
+
+    assert plain(capsys.readouterr().err).splitlines() == [
+        "Dry run — no workers will be enqueued",
+        "",
+        "",
+        "Run without --dry-run to enqueue.",
+    ]

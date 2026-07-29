@@ -12,7 +12,7 @@ import httpx
 from pydantic import BaseModel, Field, model_validator
 
 from tina.models import WorkItem
-from tina.sources.base import SourceError, parse_payload, require_env
+from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
@@ -114,6 +114,19 @@ class JiraSource:
 
         assignee = self._issue(item.id).fields.assignee
         return assignee is not None and assignee.account_id == self.bot_account_id
+
+    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
+        """The `GET` half of `claim`, with the `PUT` that follows it left off.
+
+        Jira's compare-and-set refuses *any* existing assignee — the bot
+        included — so anyone in the field is a claim that would not proceed.
+        """
+        assignee = self._issue(item.id).fields.assignee
+        if assignee is None:
+            return ClaimPrognosis(would_claim=True, holder="")
+        # An assignee with no accountId still holds the issue, and `holder=""`
+        # is reserved for nobody holding it.
+        return ClaimPrognosis(would_claim=False, holder=assignee.account_id or "unknown")
 
     def _issue(self, item_id: str) -> Issue:
         path = f"{ISSUE_PATH}/{item_id}"

@@ -39,6 +39,7 @@ Two commands, one image:
 tina dispatch --track bug --limit 5             # query, take N, enqueue N workers
 tina dispatch --track bug --limit 5 --dry-run   # preview the matches, enqueue nothing
 tina run --track bug --item 4821                # claim, run the agent, record outcome
+tina run --track bug --item 4821 --dry-run      # preview: prompt and command, no claim
 ```
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud

@@ -50,6 +50,18 @@ def default_timeout() -> float:
         return DEFAULT_TIMEOUT
 
 
+def write_prompt(prompt: str, workdir: Path) -> Path:
+    """Put the prompt where the rendered command expects it, and say where.
+
+    `run` and `tina run --dry-run` both go through here, so the file the
+    preview names is the file a real run would hand the agent.
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    prompt_file = workdir / PROMPT_FILE
+    prompt_file.write_text(prompt, encoding="utf-8")
+    return prompt_file
+
+
 def run(
     config: HarnessConfig,
     prompt: str,
@@ -57,9 +69,7 @@ def run(
     timeout: float | None = None,
 ) -> HarnessResult:
     """Write the prompt, run the harness once, read whatever it left behind."""
-    workdir.mkdir(parents=True, exist_ok=True)
-    prompt_file = workdir / PROMPT_FILE
-    prompt_file.write_text(prompt, encoding="utf-8")
+    prompt_file = write_prompt(prompt, workdir)
 
     command = config.command.render(prompt_file, workdir)
     log.info("harness starting", extra={"harness": config.name, "command": command})
