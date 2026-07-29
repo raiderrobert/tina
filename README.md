@@ -23,18 +23,19 @@ executor = "local"
 [harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
 
-[vul]
-source = "jira"
-query = "project = VUL AND status = Open AND assignee IS EMPTY"
-activity = "remediate"
-result = "github:pr"
+[bug]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug"
+activity = "triage"
+result = "github:issue-comment"
 ```
 
 Two commands, one image:
 
 ```bash
-tina dispatch --workflow vul --limit 5   # query, take N, enqueue N workers
-tina run --workflow vul --item VUL-123   # claim, run the agent, record outcome
+tina dispatch --workflow bug --limit 5   # query, take N, enqueue N workers
+tina run --workflow bug --item 4821      # claim, run the agent, record outcome
 ```
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud
