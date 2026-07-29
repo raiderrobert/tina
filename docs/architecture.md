@@ -1,219 +1,437 @@
-# Architecture
+# Tina Architecture
 
-## What Tina is
+---
 
-Tina is a Python AI agent toolkit. It provides a typed agent runtime, an extensible tool system, and a set of default capabilities — coding tools and an autonomous task loop. The toolkit is designed with swappable components: change the LLM provider, execution environment, tool set, or task source without touching the agent core.
+## 1. What it is
 
-## Three-layer package structure
+An autonomus factory takes in pre-defined work items and produces work items that are relatively easily verified by a person and potentially with the right criteria, an agent.
 
-```
-tina-ai          (0 deps on tina)     → LLM abstraction: models, streaming, providers
-  ↓
-tina-agent       (deps: tina-ai)      → Agent runtime: loop, tools, env, events, sessions, skills
-  ↓
-tina             (deps: tina-agent)   → Product: CLI, coding tools, integrations, autonomous loop
-```
+Tina is an agent harness with guardrails. The factory does orchestration only.
+The agent does all the performance, using its own tools.
 
-Dependencies flow strictly downward. `tina-ai` is independently useful as a typed LLM client. `tina-agent` is independently useful as an agent runtime. `tina` is the batteries-included product.
+---
 
-## Package responsibilities
+## 2. Pieces
 
-### tina-ai
+**Factory** — a Python package that selects a work item and calls an agent with a
+single one-shot prompt containing that work item. Orchestration only.
 
-LLM communication abstraction. Defines the types and protocols that the agent layer uses to talk to models without knowing which provider is behind them.
+**Agent harness** — invoked by the factory as a subprocess. Reference
+implementation is pi, chosen because it has the smallest feature set. Claude
+Code, Gemini CLI, and others are supported through the same adapter contract.
 
-**Defines:**
-- `Message`, `Content`, `Usage`, `Cost` — the data types for LLM communication
-- `ModelConfig` — static model metadata (provider, pricing, context window, capabilities)
-- `StreamEvent`, `StreamResult` — streaming response types
-- `Provider` protocol — the swappable interface for LLM backends
-- `ToolDefinition` — the schema format sent to LLMs for tool calling
-- `ProviderRegistry` — discovers and routes to provider implementations
+---
 
-**Ships:**
-- Default `Provider` implementation wrapping Pydantic AI (20+ LLM providers)
+## 3. Entrypoints
 
-**Does not know about:** tools, agents, files, sessions, or any product-level concept.
-
-### tina-agent
-
-Agent runtime and harness. Owns the agent loop — the cycle of prompting the model, executing tool calls, and feeding results back. Defines the protocols that make the runtime extensible.
-
-**Defines:**
-- `Tool` protocol — what a tool looks like (name, schema, execute)
-- `ToolResult` — what a tool returns (content, details, error flag)
-- `ExecutionEnv` protocol — abstract filesystem + shell (local, Docker, SSH)
-- `AgentEvent` types — lifecycle events (agent_start, turn_end, tool_exec_end, etc.)
-- `HarnessEvent` types — interceptable hooks (before_tool_call, after_tool_call, etc.)
-- `EventBus` — two-tier event system (observe + intercept)
-- `SessionStorage` protocol — conversation persistence
-- `Skill` — model-directed instructions loaded from .md files
-
-**Ships:**
-- `AgentHarness` — the main entry point that ties model, tools, env, events, and session together
-- Agent loop implementation
-- `LocalExecutionEnv` — local filesystem + subprocess
-- JSONL session storage
-- Skill loader with YAML frontmatter parsing
-
-**Does not know about:** specific tools (bash, file_read), specific integrations, or the autonomous loop.
-
-### tina
-
-The product. Opinionated defaults, specific tools, and the autonomous loop.
-
-**Ships:**
-- **Coding tools**: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` — each backed by `ExecutionEnv`
-- **Autonomous loop**: `TaskSource` protocol and `TaskRunner`
-- **CLI**: `tina run` (interactive), `tina auto` (autonomous loop), `tina eval` (evaluation)
-- **Configuration**: `TinaSettings` via pydantic-settings (env vars, TOML, CLI flags)
-- **`DockerExecutionEnv`** — sandboxed execution for autonomous operation
-
-Integration tools and task source implementations are user-provided. The toolkit provides the protocols; you bring the integrations that fit your workflow.
-
-## Agent loop
-
-The agent loop is the core of `tina-agent`. It is a cycle:
+Tina is a library with a CLI in front of it. Two subcommands:
 
 ```
-Prompt → Model request → Stream response → Extract tool calls → Execute tools → Feed results → Repeat
+tina dispatch --workflow vul --limit 5     # what the scheduler calls
+tina run --workflow vul --item VUL-123     # what the executor spawns; also local dev
 ```
 
+Tina does not own scheduling. There is no open standard for declaring a schedule
+that targets native cloud schedulers, and cron dialects are not even portable
+across them (EventBridge uses 6 fields with `?` and a year; GCP, k8s, and
+Cloudflare use 5-field unix). So cron is not a mode — it is an external scheduler
+calling `tina dispatch`. Cloud Scheduler, EventBridge, k8s CronJob, systemd
+timers, and GitHub Actions `schedule:` all work without Tina knowing.
+
+A REST/webhook entrypoint is deliberately deferred. It needs a long-lived
+listener, auth, payload validation, and a normalize path per source, and it only
+pays off when reaction latency matters more than poll latency.
+
+---
+
+## 4. Workflows
+
+A workflow is `Source -> Activity -> Result`.
+
+| Workflow | Source | Activity | Result |
+|---|---|---|---|
+| Vulnerability | Jira ticket (VUL, open, unassigned) | Remediate | PR linked on ticket, *or* discovery comment on ticket |
+| Bug | Jira ticket filed | Triage | Respond on ticket |
+| Spike | Linear ticket | Discovery work | Confluence document |
+| New data pipeline | Asana ticket | Discover where to make the change | New DBT config |
+
+Reading across the examples:
+
+- **Source** is always a ticket tracker, selected by a query. The tracker varies
+  (Jira, Linear, Asana), so the source is an adapter plus a query string.
+- **Activity** is the agent work, expressed as a skill. It is the variable part.
+- **Result** is an artifact in some other system. In most examples the result
+  system is not the source system.
+
+The agent produces the result with its own tools. Tina never writes it. So
+`result` is a declaration, not a runtime component — useful for verification and
+for knowing which credentials the image needs.
+
+One activity can produce different results per run: the vulnerability activity
+ends in a PR link or a discovery comment depending on what it finds. Results are
+not 1:1 with workflows.
+
+---
+
+## 5. Dispatch and worker
+
+Two roles, one image.
+
+**Dispatcher** runs the source query, takes up to N items, and enqueues N worker
+jobs through an executor. It never runs an agent.
+
+**Worker** takes a single work item identifier, claims it, runs the agent once,
+and records the outcome. One item = one run = one container = one log stream.
+
+Throughput scales by fanning out workers, not by concurrency inside a single
+process. A dispatcher invocation stays short and bounded; only workers are long
+and variable, which keeps them clear of scheduler timeouts.
+
+```mermaid
+flowchart TB
+    sched["external scheduler"] --> disp
+
+    subgraph disp["tina dispatch"]
+        q["run source query"]
+        n["take up to N items"]
+        enq["enqueue N jobs<br/>via executor"]
+        q --> n --> enq
+    end
+
+    enq --> w1["tina run --item A"]
+    enq --> w2["tina run --item B"]
+    enq --> w3["tina run --item C"]
+
+    subgraph w1g["worker"]
+        c["claim item"]
+        p["assemble one-shot prompt"]
+        h["invoke agent harness"]
+        v["read outcome.json<br/>verify artifacts<br/>record"]
+        c --> p --> h --> v
+    end
+
+    w1 --> w1g
+
+    style disp fill:#e8f0fe,stroke:#4285f4
+    style w1g fill:#e8f0fe,stroke:#4285f4
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │                                             │
-                    ▼                                             │
-  Prompt  ──▶  Build context  ──▶  Stream LLM  ──▶  Parse response
-                    ▲                                    │
-                    │                              ┌─────┴─────┐
-                    │                              │           │
-                    │                         end_turn    tool_calls
-                    │                              │           │
-                    │                           (done)    Execute tools
-                    │                                      │
-                    └──────────────────────────────────────┘
+
+---
+
+## 6. High level architecture
+
+```mermaid
+flowchart TB
+    subgraph outer["tina"]
+        direction TB
+        entry["CLI<br/>dispatch · run"]
+        cfg["config<br/>source → activity → result"]
+        get["get work items"]
+        claim["claim it"]
+        invoke["invoke agent harness<br/>(one-shot prompt + work item)"]
+        record["read outcome.json,<br/>verify, record"]
+    end
+
+    subgraph inner["harness"]
+        direction TB
+        prompt["activity skill"]
+        classify["classify work item"]
+        subA["branch A"]
+        subB["branch B"]
+    end
+
+    src[("source<br/>Jira · GitHub Issues")]
+    dst[("result<br/>GitHub · Confluence · DBT · ticket")]
+
+    entry --> get
+    cfg --> get
+    get --> claim
+    claim --> invoke
+    invoke ==>|"work item"| prompt
+    prompt --> classify
+    classify --> subA
+    classify --> subB
+    subA -.-> dst
+    subB -.-> dst
+    subA ==>|"outcome.json"| record
+    subB ==>|"outcome.json"| record
+    get <-.->|"query"| src
+    claim -.-> src
+    record -.->|"artifact exists?"| dst
+
+    style outer fill:#e8f0fe,stroke:#4285f4
+    style inner fill:#fef3e8,stroke:#f4a742
 ```
 
-The loop continues until the model produces a response with no tool calls (end_turn) or a stop condition is met (max turns, cost limit, abort signal).
+---
 
-At each step, events are emitted to the `EventBus`. Hooks at `before_tool_call` and `after_tool_call` allow extensions to gate, modify, or observe tool execution.
+## 7. Two levels of dispatch
 
-### Steering and follow-up
+Two dispatch decisions, at different levels, working differently:
 
-While the agent is running, external code can inject messages:
+| | Workflow selection | In-activity classification |
+|---|---|---|
+| **Decides** | which activity handles this queue | which branch handles this item |
+| **Mechanism** | query in config | rules inside the activity's prompt |
+| **Determinism** | deterministic | agentic |
+| **Owned by** | Tina | the activity |
+| **Auditable by** | reading config | reading the transcript |
 
-- **Steering messages** are injected after the current turn finishes. Used to redirect the agent mid-run.
-- **Follow-up messages** are injected after the agent would otherwise stop. Used to chain tasks.
+```mermaid
+flowchart LR
+    q1["JQL: project = VUL"] -->|deterministic| t1["remediate"]
+    q2["JQL: project = BUGS"] -->|deterministic| t2["triage"]
+    t1 -->|agentic| s1["code change → PR"]
+    t1 -->|agentic| s2["infra → ticket comment"]
 
-This matches pi's `steer()` and `followUp()` API.
-
-## ExecutionEnv
-
-The `ExecutionEnv` protocol abstracts filesystem and shell operations. Every tool that touches files or runs commands goes through this interface.
-
-```
-                  ExecutionEnv (Protocol)
-                  ├── cwd: str
-                  ├── exec(command) -> ExecResult
-                  ├── read_file(path) -> str
-                  ├── write_file(path, content)
-                  ├── list_dir(path) -> list[FileInfo]
-                  ├── exists(path) -> bool
-                  ├── mkdir(path)
-                  ├── remove(path)
-                  └── cleanup()
-                        │
-              ┌─────────┴─────────┐
-              ▼                   ▼
-       LocalExecutionEnv    DockerExecutionEnv
-       (subprocess, os)     (docker exec, docker cp)
+    style q1 fill:#e8f0fe
+    style q2 fill:#e8f0fe
+    style t1 fill:#fef3e8
+    style t2 fill:#fef3e8
+    style s1 fill:#fef3e8
+    style s2 fill:#fef3e8
 ```
 
-Tools receive an `ExecutionEnv` at construction and use it for all operations. They never import `os`, `subprocess`, or `pathlib` directly. This makes every tool automatically sandboxed when the harness uses a sandboxed environment.
+Tina never inspects the content of a work item. It only knows the item matched a
+query. All judgment about what the item actually is happens inside the activity.
 
-## Event system
+---
 
-Two tiers:
+## 8. Source adapters
 
-- **Listeners** (`bus.on(...)`) — observe events. Return values ignored. Used for logging, metrics, UI.
-- **Hooks** (`bus.hook(...)`) — intercept events. Return values modify behavior. Used for permission gates, context injection.
+| Operation | Used by | Purpose |
+|---|---|---|
+| `query()` | dispatcher | run the configured query, return work items |
+| `claim(item)` | worker | mark the item as taken; fail if already claimed |
+| `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
 
-All events are Pydantic models, serializable to JSON for replay and debugging.
+v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
+implementation makes the interface accidentally Jira-shaped, and an OSS project
+that cannot be tried without a Jira instance will not get used. GitHub Issues is
+the demo path.
 
-## Session persistence
+---
 
-Conversation history is persisted via the `SessionStorage` protocol. The default implementation writes JSONL files — one JSON object per line, each representing a session entry (message, model change, compaction, etc.).
+## 9. Claiming
 
-Sessions support:
+The tracker is the ledger. Tina holds no persistent state — no database, no local
+state file, restartable containers, multiple invokers safe by default.
 
-- **Append-only writes** — entries are appended, never mutated
-- **Path-to-root reconstruction** — rebuild the conversation from any point
-- **Compaction** — summarize old context to fit within token limits
+**The worker claims, not the dispatcher.** Claiming assigns the ticket to the bot
+user or applies a label, and the configured query excludes claimed items — which
+is what `unassigned = TRUE` is already doing in the work implementation.
 
-## Autonomous loop
+This is a choice between failure modes:
 
-The autonomous loop is a feature of `tina`, not a core runtime concept. It is a poll-dispatch-report cycle:
+| | Failure mode |
+|---|---|
+| Worker claims | dispatch can enqueue an item twice; losers exit `no_action_needed`. Self-healing. |
+| Dispatcher claims | no duplicates, but a dispatcher dying mid-loop leaves items claimed and unworked, needing a sweeper. |
 
+Self-healing wins. Duplicate containers that exit in seconds are cheap; stuck
+items need human recovery.
+
+Consequence: worker start is `claim() → if already claimed, exit
+no_action_needed`. That check needs to be atomic enough per tracker to not
+double-run. Jira assignment is a real compare-and-set if conditioned on assignee
+being empty. GitHub's assign API is an idempotent add with no conditional, so
+GitHub claiming is racy — mitigate with assign-then-reread, and exit
+`no_action_needed` if not the sole assignee. A small window remains, which is
+acceptable because duplicate workers are already the tolerated failure mode.
+
+---
+
+## 10. Executors
+
+The executor is how the dispatcher enqueues workers.
+
+| Executor | Mechanism |
+|---|---|
+| `local` | subprocess. Dev and CLI use. |
+| `cloudrun` | create a Cloud Run job execution against the same image. |
+
+v1 ships both. `local` is not optional — it is how anyone tries Tina. A single
+executor would make the interface accidentally Cloud Run-shaped. k8s Jobs, ECS,
+and others come later.
+
+---
+
+## 11. Guardrails
+
+Tina is an agent runner with a small number of constraints. Today there are two:
+
+1. **One-shot prompt.** No interactive loop. The agent gets the work item and the
+   activity prompt, runs once, exits.
+2. **Container tool surface.** The agent can only do what is installed in the
+   image. Currently one image for all workflows.
+
+---
+
+## 12. Harness adapters
+
+Every supported harness is a CLI. The adapter builds argv, passes the prompt,
+runs a subprocess, and collects the result — small enough to be declarative
+config rather than a code plugin:
+
+```toml
+[harness.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+[harness.claude]
+command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
 ```
-  ┌──▶  Poll TaskSources  ──▶  Dispatch to AgentHarness  ──▶  Report TaskResult  ──┐
-  │                                                                                  │
-  └─────────────────────── sleep(poll_interval) ◀────────────────────────────────────┘
+
+**Tina does not parse harness stdout.** Each harness reports differently, and
+parsing per-harness output is where swappability rots. Instead Tina passes an
+output path in the prompt and instructs the agent to write `outcome.json` there
+before finishing. Every harness can write a file, so the contract is
+harness-independent. Exit code is the fallback for "the agent died before
+writing."
+
+---
+
+## 13. Outcome contract
+
+Model what Tina should do next, not what happened.
+
+```json
+{
+  "outcome": "resolved | no_action_needed | needs_human | failed",
+  "details": "free-form prose — unmodeled, as much as it wants",
+  "artifacts": [{ "kind": "github:pr", "url": "..." }]
+}
 ```
 
-Each task gets its own `ExecutionEnv` (typically Docker). Tasks are processed concurrently up to a configured limit. Cost budgets prevent runaway spending.
+Four terminal states. Permission failures are `failed` plus a prose string — that
+never needed a rich type, it needed somewhere to put text. `needs_human`
+separates "this run broke" from "this run correctly concluded a person must
+decide," which is where the infra branch lives permanently.
 
-The same `AgentHarness` that powers the interactive CLI powers the autonomous loop. The difference is configuration: which tools are available, which `ExecutionEnv` is used, and whether there's a human at the terminal.
+Inputs can be constrained; outputs resist a contract, because real runs terminate
+in wildly varying ways. This is why only the enum is modeled and `details` stays
+prose.
 
-## File structure
+---
 
+## 14. Verification
+
+When `outcome` is `resolved` and `artifacts` are declared, Tina confirms each
+artifact exists. The other three states have nothing to check.
+
+v1 does a **generic** check: HTTP GET each URL using credentials already in the
+environment. This catches the dominant failure — an agent reporting `resolved`
+with a PR URL it never opened — for very little code. Typed per-`kind` verifiers
+(PR is open, targets the right repo, is non-empty) would be a third adapter
+family alongside sources and executors, and would triple the v1 surface to catch
+failures not yet observed.
+
+On mismatch, do not overwrite the agent's report. Record `outcome: resolved` plus
+`verified: false`, and flip the effective status to `needs_human`. Preserving the
+claim is what makes it possible to debug an activity that lies.
+
+Tina needs read credentials for result systems, which it does not need today.
+They are already in the image for the agent, so this is env reuse rather than new
+secrets plumbing.
+
+---
+
+## 15. Configuration
+
+```toml
+harness = "pi"
+executor = "cloudrun"
+
+[vul]
+source = "jira"
+query = "project = VUL AND status = Open AND assignee IS EMPTY"
+activity = "remediate"      # skill name; defaults to key
+result = "github:pr"        # declaration only
+
+[bug]
+source = "github"
+query = "repo:acme/api is:issue is:open no:assignee label:bug"
+activity = "triage"
+result = "github:issue-comment"
 ```
-packages/
-├── tina-ai/
-│   └── src/tina_ai/
-│       ├── __init__.py
-│       ├── types.py              # Message, Content, Usage, Cost, StopReason
-│       ├── models.py             # ModelConfig, ModelCost
-│       ├── stream.py             # StreamEvent, StreamResult protocol
-│       ├── provider.py           # Provider protocol, ToolDefinition, StreamOptions
-│       ├── registry.py           # ProviderRegistry
-│       └── providers/
-│           ├── __init__.py
-│           └── pydantic_ai.py    # Default Provider wrapping Pydantic AI
-│
-├── tina-agent/
-│   └── src/tina_agent/
-│       ├── __init__.py
-│       ├── types.py              # AgentMessage, AgentState
-│       ├── tools.py              # Tool protocol, ToolResult
-│       ├── env.py                # ExecutionEnv protocol, FileInfo, FileError, ExecResult
-│       ├── events.py             # AgentEvent, HarnessEvent, EventBus
-│       ├── loop.py               # Agent loop implementation
-│       ├── session.py            # SessionStorage protocol, SessionEntry
-│       ├── skills.py             # Skill model, load_skills(), format_skills_for_prompt()
-│       ├── harness.py            # AgentHarness
-│       └── envs/
-│           ├── __init__.py
-│           └── local.py          # LocalExecutionEnv
-│
-└── tina/
-    └── src/tina/
-        ├── __init__.py
-        ├── cli.py                # Typer CLI: run, auto, eval
-        ├── config.py             # TinaSettings (pydantic-settings)
-        ├── tools/
-        │   ├── __init__.py       # create_coding_tools()
-        │   ├── file_read.py
-        │   ├── file_write.py
-        │   ├── file_edit.py
-        │   ├── shell.py
-        │   ├── grep.py
-        │   ├── find.py
-        │   └── ls.py
-        ├── auto/
-        │   ├── __init__.py
-        │   ├── source.py         # TaskSource protocol, Task, TaskResult
-        │   └── runner.py         # TaskRunner
-        └── envs/
-            ├── __init__.py
-            └── docker.py         # DockerExecutionEnv
+
+The work implementation this is derived from used a Jira-bound schema:
+
+```toml
+[vul]
+track = 'tracks/vul'
+jql = "project = VUL AND status in open and unassgined = TRUE"
 ```
+
+`jql` binds the schema to one tracker. `source` + `query` generalizes it.
+
+---
+
+## 16. Activity anatomy
+
+An activity is a skill with a constrained input shape. It may contain multiple
+branches, distinguished by classification rules in its prompt.
+
+Example — the vulnerability activity:
+
+```mermaid
+flowchart TD
+    item["CVE ticket:<br/>package X @ version Y"] --> cls{"classify"}
+    cls -->|"code we own"| code["find existing Dependabot PR<br/>↓<br/>verify it's actually sufficient<br/>↓<br/>link it to the ticket<br/>↓<br/>(create PR if none exists)"]
+    cls -->|"infra we don't own<br/>maybe not in source control"| infra["discovery<br/>↓<br/>comment findings on ticket"]
+```
+
+---
+
+## 17. Distribution
+
+Three artifacts, of which this repo is one:
+
+```mermaid
+flowchart LR
+    core["**tina**<br/>OSS, this repo<br/>no activities"]
+    ref["**reference activities**<br/>public, copyable"]
+    consumer["**consumer repo**<br/>per-company, private"]
+    run["running factory<br/>in company infra"]
+
+    core -->|"reference Dockerfile"| consumer
+    ref -->|"napoln add"| consumer
+    consumer -->|"IaC deploy"| run
+
+    style core fill:#e8f0fe,stroke:#4285f4
+```
+
+Activities are installed with [napoln](https://github.com/raiderrobert/napoln),
+since they are a kind of skill. **Tina contains no fetching code**: the consumer's
+image build runs `napoln install`, skills land on disk, and Tina reads them from
+a directory. Versioning, pinning, and three-way-merge upgrades are napoln's job.
+
+---
+
+## 18. v1 scope
+
+| Area | v1 |
+|---|---|
+| Language | Python |
+| Entrypoints | CLI only — `dispatch`, `run` |
+| Scheduling | not owned; external schedulers call `dispatch` |
+| Concurrency | one item per worker; fan out via executor |
+| Sources | Jira, GitHub Issues |
+| Executors | `local`, `cloudrun` |
+| Harnesses | pi (reference), Claude Code |
+| Claiming | worker claims; tracker is the ledger; no persistent state |
+| Verification | generic artifact-URL existence check |
+| Activities | none shipped; installed via napoln |
+
+Deferred: REST/webhook entrypoint, `normalize(payload)`, typed result verifiers,
+per-workflow images, stuck-claim sweeper, Linear and Asana adapters, k8s and ECS
+executors.
+
+---
+
+## 19. Prior design
+
+This repo previously documented a three-layer agent harness toolkit (`tina-ai`,
+`tina-agent`, `tina`) with a long-lived polling autonomous loop. That design is
+superseded by this document and recoverable from git history. Shipping a native
+harness may be revisited later; it would become another entry in §12 rather than
+a change to this architecture.
