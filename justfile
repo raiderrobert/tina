@@ -7,7 +7,8 @@ default:
 # and are synced by default, while `cloudrun` is an extra that `just types`
 # needs resolvable. Without it, ty reports unresolved-import on the
 # `from google.cloud import run_v2` line in src/tina/executors/cloudrun.py.
-# Matches CI's install step exactly.
+# CI's install step calls this recipe (.github/workflows/ci.yml), so there is
+# nothing to keep in sync by hand.
 
 # Install all dependencies, including the cloudrun extra
 setup:

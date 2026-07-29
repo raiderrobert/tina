@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -15,23 +19,19 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install just
+        uses: extractions/setup-just@v2
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: just setup
 
-      - name: Lint
-        run: uv run ruff check
+      - name: Show interpreter
+        run: uv run python -V
 
-      - name: Format
-        run: uv run ruff format --check
-
-      # ty is pre-1.0; a new release finding new diagnostics should not block a PR.
-      - name: Type check
-        run: uv run ty check
-        continue-on-error: true
-
-      - name: Test
-        run: uv run pytest
+      - name: Check
+        run: just check
 
       - name: Build
-        run: uv build
+        run: just build
