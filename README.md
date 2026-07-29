@@ -4,41 +4,61 @@
 
 ---
 
-# Tina Agent Toolkit Mono Repo
+An autonomous factory. Tina takes in pre-defined work items and produces work
+items that are relatively easily verified by a person — and, with the right
+criteria, by an agent.
 
-This is the home of the Tina agent toolkit — a Python AI agent harness with batteries included and swappable components.
+It is an agent harness with guardrails. Tina does orchestration only: it selects
+a work item, claims it, and calls an agent once with a one-shot prompt. The agent
+does all the performance, using its own tools.
 
-* **[tina](packages/tina)**: CLI, coding tools, and autonomous loop
-* **[tina-agent](packages/tina-agent)**: Agent runtime with tool calling, events, sessions, and skills
-* **[tina-ai](packages/tina-ai)**: Typed multi-provider LLM API (Anthropic, OpenAI, Google, …)
+## How it works
 
-## All Packages
+A workflow is `Source -> Activity -> Result`.
 
-| Package | Description |
-|---------|-------------|
-| **[tina-ai](packages/tina-ai)** | LLM abstraction — models, streaming, provider protocol. Default wraps Pydantic AI. |
-| **[tina-agent](packages/tina-agent)** | Agent runtime — loop, tool protocol, ExecutionEnv, event bus, sessions, skills |
-| **[tina](packages/tina)** | Product — CLI, coding tools, autonomous task loop |
+```toml
+harness = "pi"
+executor = "cloudrun"
 
-Dependencies flow strictly downward. `tina-ai` has no dependency on `tina-agent`. `tina-agent` has no dependency on `tina`. Each layer is independently useful.
+[vul]
+source = "jira"
+query = "project = VUL AND status = Open AND assignee IS EMPTY"
+activity = "remediate"
+result = "github:pr"
+```
 
-## Key Ideas
+Two commands, one image:
 
-- **Typed everything.** Pydantic models for data, Python Protocols for interfaces. Every boundary validates.
-- **Swappable.** Model provider, execution environment, tool set, task source — change any piece without touching the rest.
-- **Sandboxed.** `ExecutionEnv` protocol abstracts file ops and shell. Local for dev, Docker for autonomous. Tools never call `subprocess` directly.
-- **Two-tier events.** Listeners observe (logging, metrics, UI). Hooks intercept (permission gates, context injection, tool overrides).
-- **Autonomous loop.** Implement the `TaskSource` protocol for your work system. Agent processes tasks headlessly. Human reviews at the end.
-- **Skills.** Load domain knowledge from `.md` files.
+```bash
+tina dispatch --workflow vul --limit 5   # query, take N, enqueue N workers
+tina run --workflow vul --item VUL-123   # claim, run the agent, record outcome
+```
+
+An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud
+Scheduler, EventBridge, k8s CronJob, systemd timers, and GitHub Actions all work
+without Tina knowing about them.
+
+## Design
+
+- **Orchestration only.** Tina never writes a result. The agent does, with its
+  own tools.
+- **Harness agnostic.** pi, Claude Code, and others are subprocess adapters. Tina
+  never parses harness stdout — the agent writes `outcome.json` to a path Tina
+  provides.
+- **No persistent state.** The tracker is the ledger. Workers claim items, and
+  claimed items drop out of the query.
+- **No activities included.** Activities are skills, installed with
+  [napoln](https://github.com/raiderrobert/napoln) at image build time.
 
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
-| [docs/architecture.md](docs/architecture.md) | System design — layers, agent loop, ExecutionEnv, events, file structure |
-| [docs/types.md](docs/types.md) | Complete type reference across all three packages |
-| [docs/autonomous-loop.md](docs/autonomous-loop.md) | Autonomous loop — task sources, runner, isolation, cost control |
-| [docs/adr/](docs/adr/) | Architecture Decision Records — the why behind each design decision |
+| [docs/architecture.md](docs/architecture.md) | System design — workflows, dispatch/worker, adapters, outcome contract, v1 scope |
+
+## Status
+
+Design stage. v1 scope is §18 of the architecture doc.
 
 ## Development
 
