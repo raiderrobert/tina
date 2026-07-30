@@ -14,6 +14,8 @@ does all the performance, using its own tools.
 
 ![tina demo](tina-demo.gif)
 
+[**Volume:** 1,000 tickets through eight parallel dispatchers →](tina-volume-demo.gif) — 967 pull requests opened for review, 33 escalated to a human.
+
 ## How it works
 
 A track is `Source -> Skill -> Result`.
