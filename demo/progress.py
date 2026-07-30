@@ -26,7 +26,7 @@ Mid-run, `claimed - PRs open` is "in flight *or* escalated" and the tracker
 cannot tell those apart; the split is only knowable once nothing is in flight,
 which is beat 5's job.
 
-    ./progress.py runs-*.jsonl [--timeout 300] [--interval 0.5]
+    ./progress.py runs-*.jsonl [--timeout 300] [--interval 1.0]
 
 Exits 0 when every ticket is claimed and every run has reported. Exits non-zero
 on the timeout, so a stalled fan-out fails the recording instead of hanging it.
@@ -52,17 +52,26 @@ TIMEOUT = 10.0
 #: frames, so it and the renderer cannot drift apart.
 LINES = 6
 
-#: Completions shown under the counter. Three is the tail §10 costs out; it is
-#: the first thing to trim if the gif ever goes over budget.
+#: Seconds between polls, and the demo's main size lever. `agg` emits a frame
+#: per changed screen, so the refresh rate is very nearly the frame count: the
+#: same fan-out rendered 109 frames and 496,121 bytes at 0.5 s, over the
+#: recording's 400,000 budget. One second halves the progress frames and still
+#: reads as live -- a thousand tickets in fifty seconds move the counter by
+#: ~20 between frames, which is plenty to watch.
+INTERVAL = 1.0
+
+#: Completions shown under the counter. The next size lever after the interval;
+#: at three, each frame's changed area is the counter, the bar and three short
+#: lines.
 TAIL = 3
 
 #: Width of the proportional bar, chosen to leave the whole block inside 98
 #: columns with room for the percentage.
 BAR_WIDTH = 60
 
-#: The dispatch query without its component label: every workable bug, and the
-#: same text `tina-volume.toml`'s eight tracks share.
-UNCLAIMED_QUERY = f"repo:{REPO} is:issue is:open no:assignee label:bug"
+#: Every open bug, claimed or not. The dispatch query with its `no:assignee`
+#: clause dropped, which makes its result invariant while the fan-out runs.
+ALL_BUGS_QUERY = f"repo:{REPO} is:issue is:open label:bug"
 
 
 def api_base() -> str:
@@ -78,10 +87,11 @@ def get_json(url: str) -> Any:
         return json.loads(response.read())
 
 
-def search_count(query: str) -> int:
-    """`total_count` for one tracker search."""
+def search(query: str) -> list[dict[str, Any]]:
+    """The matching issues, in one request."""
     url = f"{api_base()}/search/issues?" + urllib.parse.urlencode({"q": query})
-    return int(get_json(url)["total_count"])
+    items = get_json(url)["items"]
+    return list(items)
 
 
 def open_pull_requests() -> int:
@@ -91,21 +101,31 @@ def open_pull_requests() -> int:
 
 def claimed_count() -> int:
     """The bugs the bot holds -- the other half of the dispatch query."""
-    return search_count(f"repo:{REPO} is:issue is:open assignee:{bot_login()} label:bug")
+    return len(search(f"repo:{REPO} is:issue is:open assignee:{bot_login()} label:bug"))
 
 
 def backlog_total() -> int:
     """The denominator: every bug the eight tracks can work, claimed or not.
 
-    Read, not hardcoded -- but read as the *sum* of the two halves rather than
-    off the unclaimed query alone. This starts after beat 2 has already launched
-    the fan-out, so by now the unclaimed count is short by however many tickets
-    the dispatchers got to first. A claim only moves an issue from one half to
-    the other, so the sum is the same number at any moment during the run. The
-    twelve a human holds are in neither half, which is why they are not in the
-    denominator: they are not the factory's to work.
+    Read, not hardcoded, and read out of **one** response. This starts after
+    beat 2 has already launched the fan-out, so the unclaimed query alone would
+    already be short by whatever the dispatchers got to first -- and summing the
+    unclaimed and claimed queries is worse than wrong, it is flaky: a ticket
+    claimed between the two requests is counted in both, and a denominator one
+    too large means the run never reaches 100% and the beat times out.
+
+    So: every open bug in one snapshot, minus the ones a person already holds.
+    The stub builds that list under its lock, and neither half of the subtraction
+    moves while the fan-out runs, so the number is the same whenever it is read.
+    A ticket a human holds is not the factory's to work and is not in the
+    denominator -- which is the whole point of beat 5.
     """
-    return search_count(UNCLAIMED_QUERY) + claimed_count()
+    workable = [
+        issue
+        for issue in search(ALL_BUGS_QUERY)
+        if not issue["assignees"] or any(a["login"] == bot_login() for a in issue["assignees"])
+    ]
+    return len(workable)
 
 
 class Tail:
@@ -227,7 +247,7 @@ def watch(paths: list[Path], interval: float, timeout: float) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Live progress for the volume demo.")
     parser.add_argument("logs", nargs="+", type=Path, help="The dispatchers' JSON streams.")
-    parser.add_argument("--interval", type=float, default=0.5, help="Seconds between polls.")
+    parser.add_argument("--interval", type=float, default=INTERVAL, help="Seconds between polls.")
     parser.add_argument("--timeout", type=float, default=300.0, help="Give up after this long.")
     args = parser.parse_args(argv[1:])
     return watch(args.logs, args.interval, args.timeout)

@@ -50,6 +50,18 @@ caption() {
     printf '\033[0;90m%s\033[0m\n' "$1"
 }
 
+# Wipe the screen at a beat boundary. This is the recording's largest size
+# lever, and it is not decoration: beats 1-3 leave the 30-row terminal full, so
+# every line printed after that scrolls all thirty and `agg` has to store a
+# whole-screen frame. Measured on this session -- beats 4-6 rendered as nine
+# 831x563 repaints costing 22-48 KB each, ~330 KB of a 474 KB gif. Printed
+# rather than `clear`, which needs a terminfo entry the recording should not
+# depend on. It is a beat boundary and never a repaint loop: `progress.py`
+# rewrites its block in place for exactly the same reason.
+screen() {
+    printf '\033[2J\033[H'
+}
+
 # Beat 5's first half. `already claimed` and `run complete` are the two lines
 # that matter out of the run's JSON stream; the rest is httpx and the executor.
 # The artifact count is printed rather than assumed: a yielding worker opening a
@@ -57,8 +69,7 @@ caption() {
 JQ_RUN='
     select(.message == "already claimed" or .message == "run complete")
     | if .report then "  #\(.item)  \(.report.outcome) · \(.report.details)"
-                      + " · \(.report.artifacts | length) pull requests"
-      else "  #\(.item)  \(.message)" end'
+        + " · \(.report.artifacts|length) pull requests" else "  #\(.item)  \(.message)" end'
 
 # Beat 1 — the backlog. No tina on screen: this is the tracker view a person
 # would be looking at. Nobody scrolls a thousand rows, so the totals are the
@@ -112,6 +123,10 @@ pause
 # whole-backlog counts are asserted for all 1,000 in beat 5. Its stdout is the
 # JSON stream and the counts are the stderr half of tina's output boundary, so
 # the stream is redirected to keep them readable at 98 columns.
+#
+# The remaining three beats are sized to land inside one screen, so nothing
+# after this scrolls.
+screen
 prompt 'tina status --track bug-api >/dev/null'
 $TINA status --track bug-api >/dev/null
 pause

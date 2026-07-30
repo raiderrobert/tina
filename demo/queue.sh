@@ -83,13 +83,16 @@ prs() {
             "  \(length) open, awaiting review"'
 }
 
-# The review queue at volume: the count is the story, and the newest few rows are
-# there to show they are real pull requests with a real author.
+# The review queue at volume: the count is the story, and the newest rows are
+# there to show they are real pull requests with a real author. Two rows, not
+# three: this is the beat that decides whether the volume demo's last three
+# beats fit one 30-row screen, and a screen they scroll off is a whole-screen
+# frame per line in the gif.
 prs_summary() {
     pulls |
         jq -r '
             "  \(length) pull requests open · awaiting review",
-            (.[-3:][] | "  #\(.number)  \((.title + (" " * 60))[0:56])  \(.user.login)")'
+            (.[-2:][] | "  #\(.number)  \((.title + (" " * 60))[0:56])  \(.user.login)")'
 }
 
 case "${1:-}${2:+ $2}" in
