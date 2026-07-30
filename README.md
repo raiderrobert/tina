@@ -12,6 +12,18 @@ It is an agent harness with guardrails. Tina does orchestration only: it selects
 a work item, claims it, and calls an agent once with a one-shot prompt. The agent
 does all the performance, using its own tools.
 
+The point is not that Tina is fast. It is that you are not there while it runs.
+
+You take work you have already done once, re-derive it into a one-shot prompt
+under different conditions, hand it off, and go do something else. What you come
+back to is finished work items and the evidence to check them: each artifact
+re-fetched from the tracker rather than taken on the agent's word, and anything
+ambiguous escalated instead of guessed at.
+
+That scales your attention, not the machine's throughput. A run that takes three
+hours unattended is worth more than one that takes three minutes with you
+watching it.
+
 ![tina demo](tina-demo.gif)
 
 ## How it works
@@ -73,7 +85,12 @@ without Tina knowing about them.
 
 ## Status
 
-Implemented, pre-release. Not yet published to PyPI. v1 scope is §18 of the architecture doc.
+v0.1.0, published to PyPI as [`tina-cli`](https://pypi.org/project/tina-cli/) (the import and CLI stay `tina`).
+v1 scope is §18 of the architecture doc.
+
+```bash
+pip install tina-cli
+```
 
 ## Development
 
