@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.1](https://github.com/raiderrobert/tina/compare/v0.1.0...v0.1.1) (2026-07-30)
+
+
+### Features
+
+* **cli:** add --dry-run to run ([c190161](https://github.com/raiderrobert/tina/commit/c1901610057f44d6c99f38bcaf108fcc2b2ac5a0)), closes [#19](https://github.com/raiderrobert/tina/issues/19)
+* **cli:** add tina status ([30a5fb1](https://github.com/raiderrobert/tina/commit/30a5fb165046b51994056de82a2d50de2fb6460d)), closes [#23](https://github.com/raiderrobert/tina/issues/23)
+
+
+### Documentation
+
+* install tina-cli from PyPI in the reference Dockerfile ([9cef666](https://github.com/raiderrobert/tina/commit/9cef66688a616f07d7b34d401dbbbcb04aac6108)), closes [#2](https://github.com/raiderrobert/tina/issues/2)
+* redo the demo — a 10-bug queue becomes a PR review queue ([#26](https://github.com/raiderrobert/tina/issues/26)) ([1fb98d8](https://github.com/raiderrobert/tina/commit/1fb98d89da1effbd251b471b0f3e2bf2a31506df)), closes [#20](https://github.com/raiderrobert/tina/issues/20)
+* say what Tina is for, and correct the release status ([#28](https://github.com/raiderrobert/tina/issues/28)) ([58c609f](https://github.com/raiderrobert/tina/commit/58c609faa793d384aeafbfaffb996afcf2270e18))
+
 ## 0.1.0 (2026-07-29)
 
 
