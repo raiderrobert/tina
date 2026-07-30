@@ -1,32 +1,39 @@
 # Tina
 
-> *"Tina, eat. Food. Eat the FOOD!"*
+Tina is an autonomous factory. It takes in clear work items from Jira, Github issues, etc and work on them to produce work that's relatively easily verified by a person.
 
----
+```bash
+pip install tina-cli
+```
 
-An autonomous factory. Tina takes in pre-defined work items and produces work
-items that are relatively easily verified by a person — and, with the right
-criteria, by an agent.
-
-It is an agent harness with guardrails. Tina does orchestration only: it selects
-a work item, claims it, and calls an agent once with a one-shot prompt. The agent
-does all the performance, using its own tools.
-
-The point is not that Tina is fast. It is that you are not there while it runs.
-
-You take work you have already done once, re-derive it into a one-shot prompt
-under different conditions, hand it off, and go do something else. What you come
-back to is finished work items and the evidence to check them: each artifact
-re-fetched from the tracker rather than taken on the agent's word, and anything
-ambiguous escalated instead of guessed at.
-
-That scales your attention, not the machine's throughput. A run that takes three
-hours unattended is worth more than one that takes three minutes with you
-watching it.
 
 ![tina demo](tina-demo.gif)
 
-## How it works
+
+## How is Tina different from an agent harness? 
+Tina is an orchestrator of sort.
+
+It selects a work item, claims it, and calls an agent harness once with a one-shot prompt that I call a _track_.
+
+The agent harness does the individual work item. Currently, I use [pi](https://github.com/earendil-works/pi), because it's small and relatively stable. I may use a different one in the future.
+
+## So what's the value of doing this approach instead?
+
+With an agent harness, you have to sit there and steer it. Even if you have one shot prompts, you need to put those prompts in there.
+
+For work items that are very self similar, you can instead make what I can a _track_.
+
+Think of it like a runbook or a guide. You take several examples of work you have already done once and use them to describe to the agent what it should do.
+
+Then upstream from this system in your ticketing system, you make work items for it.
+
+Downstream from this system PRs get made or Confluence docs get write or whatver other outcome you want.
+
+You just write tickets instead of driving around your agent to get work done.
+
+This approach scales your attention better than having 5 simultaneous agent sessions running simultaenously, especially you enter production situations where you're quickly drowned by the amount of work coming your way. 
+
+## High-level track approach
 
 A track is `Source -> Skill -> Result`.
 
@@ -45,14 +52,12 @@ track = "triage"
 result = "github:issue-comment"
 ```
 
-Three commands, one image:
+A basic workflow:
 
 ```bash
-tina dispatch --track bug --limit 5             # query, take N, enqueue N workers
-tina dispatch --track bug --limit 5 --dry-run   # preview the matches, enqueue nothing
-tina run --track bug --item 4821                # claim, run the agent, record outcome
-tina run --track bug --item 4821 --dry-run      # preview: prompt and command, no claim
-tina status --track bug                         # counts: waiting for a worker, held by one
+tina dispatch --track bug --limit 5            
+tina run --track bug --item 4821             
+tina status --track bug              
 ```
 
 `status` derives both counts from the track's own `query` — once as `dispatch` runs
@@ -82,15 +87,6 @@ without Tina knowing about them.
 | [docs/architecture.md](docs/architecture.md) | System design — tracks, dispatch/worker, adapters, outcome contract, v1 scope |
 | [docs/adr/](docs/adr/) | Architecture decision records — the reasoning behind each design choice |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the check loop, layout, how to add adapters, commit conventions |
-
-## Status
-
-v0.1.0, published to PyPI as [`tina-cli`](https://pypi.org/project/tina-cli/) (the import and CLI stay `tina`).
-v1 scope is §18 of the architecture doc.
-
-```bash
-pip install tina-cli
-```
 
 ## Development
 
