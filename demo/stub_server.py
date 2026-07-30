@@ -2,23 +2,32 @@
 
 `tina run` claims a work item by POSTing to the real tracker, so recording a
 demo against a live repo would mutate it. The demo points `GITHUB_API_URL` at
-this server instead and serves the four endpoints the run touches:
+this server instead and serves the endpoints the recording touches:
 
     GET  /search/issues                         -- the dispatch query, filtered by assignee
     GET  /repos/{owner}/{name}/issues/{n}       -- fetch, and the claim re-read
     POST /repos/{owner}/{name}/issues/{n}/assignees
+    POST /repos/{owner}/{name}/pulls            -- the agent opens one pull request per ticket
+    GET  /repos/{owner}/{name}/pulls            -- the review queue `queue.sh prs` reads
     GET  /{owner}/{name}/pull/{n}               -- the artifact tina verifies
 
 Claiming is assign-then-reread (`GitHubSource.claim`): the bot must come back
 as the *sole* assignee, so the POST records the assignment and the next GET
 reflects it. stdlib only -- the demo adds no dependency.
+
+Pull requests are real server state, not props. The POST assigns the number,
+the GET lists only pull requests that were actually created, and
+`/{owner}/{name}/pull/{n}` 404s for every other number -- which is what makes
+`verified: true` in the run record a check rather than a rubber stamp.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -26,19 +35,46 @@ from urllib.parse import parse_qs, urlparse
 
 REPO = "acme/api"
 
-#: The issues the dispatch query matches, newest first.
+#: The issues the dispatch query matches. Insertion order is dispatch order and
+#: is what makes the recording reproducible, so do not sort this at use.
 ISSUES: dict[int, str] = {
     4821: "Crash on empty webhook payload",
     4830: "Retry storm when the upstream returns 503",
     4844: "Timestamps drift by one hour under DST",
+    4852: "Duplicate charge when a retry races the callback",
+    4858: "Search returns deleted records after a reindex",
+    4863: "CSV export truncates fields containing a comma",
+    4871: "Token refresh loops when the clock is skewed",
+    4877: "Pagination skips a row at the page boundary",
+    4884: "Uploads over 10 MB fail without an error",
+    4890: "Rate limiter counts preflight requests twice",
 }
 
 ISSUE = re.compile(r"^/repos/(?P<repo>[^/]+/[^/]+)/issues/(?P<number>\d+)$")
 ASSIGNEES = re.compile(r"^/repos/(?P<repo>[^/]+/[^/]+)/issues/(?P<number>\d+)/assignees$")
+PULLS = re.compile(r"^/repos/(?P<repo>[^/]+/[^/]+)/pulls$")
 PULL = re.compile(r"^/(?P<repo>[^/]+/[^/]+)/pull/(?P<number>\d+)$")
 
 #: Who each issue is assigned to. Empty until the worker claims it.
 assigned: dict[int, list[str]] = {}
+
+#: The pull requests this server issued, keyed by number, oldest first.
+pulls: dict[int, dict[str, Any]] = {}
+
+#: The pull request numbers start above every issue number, so a reader can
+#: never mistake one for the other. Bumped before each POST, so the first pull
+#: request the stub issues is #4901.
+PR_COUNTER_START = 4900
+pr_counter = PR_COUNTER_START
+
+#: This is a ThreadingHTTPServer: two POSTs can land at once, and each must get
+#: its own number.
+pr_lock = threading.Lock()
+
+#: Who the stub reports as the author of the pull requests it is handed. The
+#: real API takes this from the token; `record.sh` exports the same value it
+#: gives tina, so the two agree.
+BOT_LOGIN = os.environ.get("GITHUB_BOT_LOGIN") or "tina-demo-bot"
 
 
 def issue_payload(base_url: str, number: int) -> dict[str, Any]:
@@ -50,6 +86,28 @@ def issue_payload(base_url: str, number: int) -> dict[str, Any]:
         "html_url": f"{base_url}/{REPO}/issues/{number}",
         "assignees": [{"login": login} for login in assigned.get(number, [])],
     }
+
+
+def open_pull_request(base_url: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Record a new pull request under the next number and return it.
+
+    The caller does not get to pick the number -- the same rule the real API
+    plays by, and the reason the agent has to report the URL it was handed.
+    """
+    global pr_counter
+    with pr_lock:
+        pr_counter += 1
+        number = pr_counter
+        payload = {
+            "number": number,
+            "title": str(body.get("title", "")),
+            "body": str(body.get("body", "")),
+            "html_url": f"{base_url}/{REPO}/pull/{number}",
+            "state": "open",
+            "user": {"login": BOT_LOGIN},
+        }
+        pulls[number] = payload
+    return payload
 
 
 def matches(q: str, number: int) -> bool:
@@ -89,25 +147,42 @@ class Handler(BaseHTTPRequestHandler):
         if match and match["repo"] == REPO and int(match["number"]) in ISSUES:
             self.respond(200, issue_payload(self.base_url, int(match["number"])))
             return
-        if PULL.match(path):
-            # The artifact the agent reports. `tina.verify` GETs it, and a 200
-            # here is what makes `verified: true` a real result.
-            self.respond(200, {"state": "open"})
+        match = PULLS.match(path)
+        if match and match["repo"] == REPO:
+            # Newest last, which is the order they were created in.
+            self.respond(200, list(pulls.values()))
+            return
+        match = PULL.match(path)
+        if match and match["repo"] == REPO and int(match["number"]) in pulls:
+            # The artifact the agent reports. `tina.verify` GETs it, and this
+            # 200 is only reachable for a pull request the stub really issued --
+            # a number nobody created falls through to the 404 below, so
+            # `verified: true` cannot be earned by naming a plausible URL.
+            self.respond(200, pulls[int(match["number"])])
             return
         self.respond(404, {"message": "Not Found"})
 
     def do_POST(self) -> None:  # noqa: N802 -- the BaseHTTPRequestHandler contract
-        match = ASSIGNEES.match(self.path.split("?", 1)[0])
-        if not match or match["repo"] != REPO:
-            self.respond(404, {"message": "Not Found"})
+        path = self.path.split("?", 1)[0]
+        body = self.read_body()
+        match = ASSIGNEES.match(path)
+        if match and match["repo"] == REPO:
+            number = int(match["number"])
+            assigned[number] = list(body.get("assignees", []))
+            self.respond(201, issue_payload(self.base_url, number))
             return
-        length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
-        number = int(match["number"])
-        assigned[number] = list(body.get("assignees", []))
-        self.respond(201, issue_payload(self.base_url, number))
+        match = PULLS.match(path)
+        if match and match["repo"] == REPO:
+            self.respond(201, open_pull_request(self.base_url, body))
+            return
+        self.respond(404, {"message": "Not Found"})
 
-    def respond(self, status: int, payload: dict[str, Any]) -> None:
+    def read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length") or 0)
+        parsed = json.loads(self.rfile.read(length) or b"{}")
+        return parsed if isinstance(parsed, dict) else {}
+
+    def respond(self, status: int, payload: dict[str, Any] | list[Any]) -> None:
         body = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")

@@ -32,12 +32,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for tool in asciinema agg python3; do
+for tool in asciinema agg python3 jq curl; do
     command -v "$tool" >/dev/null 2>&1 || {
         echo "record.sh: $tool is not installed" >&2
         exit 1
     }
 done
+
+# Exported before the stub starts, because the stub reads it too: it is the
+# author it reports on the pull requests the agent opens, and the login tina
+# claims issues as. One value, so the two halves of beat 3 agree.
+export GITHUB_BOT_LOGIN=tina-demo-bot
 
 python3 "$DEMO_DIR/stub_server.py" --url-file "$WORK/url" >"$WORK/stub.log" 2>&1 &
 STUB_PID=$!
@@ -58,11 +63,12 @@ done
 GITHUB_API_URL=$(cat "$WORK/url")
 export GITHUB_API_URL
 export GITHUB_TOKEN=demo-token
-export GITHUB_BOT_LOGIN=tina-demo-bot
 export PYTHONPATH="$DEMO_DIR"
 # `-m agent` would otherwise leave a demo/__pycache__ behind in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
-export TINA_DEMO_OUTCOME="$WORK/outcome.json"
+# Beat 2 pipes tina's stdout through jq, and a block-buffered stream would
+# arrive as one burst at the end instead of a line per finished ticket.
+export PYTHONUNBUFFERED=1
 
 if [ -z "${TINA:-}" ]; then
     if command -v tina >/dev/null 2>&1; then
@@ -74,9 +80,10 @@ fi
 export TINA
 
 # The recording runs in a scratch copy of this directory, so `tina.toml` is
-# found by default, `cat outcome.json` needs no path, and the checkout stays
-# clean.
+# found by default, the on-screen command is `./queue.sh` with no path, and the
+# checkout stays clean.
 cp "$DEMO_DIR/tina.toml" "$WORK/tina.toml"
+cp "$DEMO_DIR/queue.sh" "$WORK/queue.sh"
 cp -R "$DEMO_DIR/tracks" "$WORK/tracks"
 cd "$WORK"
 

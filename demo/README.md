@@ -7,11 +7,36 @@
 ```
 
 It needs [asciinema](https://asciinema.org) and
-[agg](https://github.com/asciinema/agg) (`brew install asciinema agg`), plus
-either `tina` on `PATH` or `uv` to run it out of this checkout. Nothing else,
-and no network: `record.sh` starts a local stub of the GitHub REST API and
-points Tina at it with `GITHUB_API_URL`, so recording the demo cannot touch a
-real tracker. Recording it offline produces the same gif.
+[agg](https://github.com/asciinema/agg) (`brew install asciinema agg`), `jq` and
+`curl`, plus either `tina` on `PATH` or `uv` to run it out of this checkout.
+Nothing else, and no network: `record.sh` starts a local stub of the GitHub REST
+API and points Tina at it with `GITHUB_API_URL`, so recording the demo cannot
+touch a real tracker. Recording it offline produces the same gif.
+
+## The four beats
+
+The story is one queue getting worked: ten open bugs in, ten pull requests
+waiting for review out.
+
+1. **The queue.** `./queue.sh bugs` — the ten open, unassigned bugs the tracker
+   holds. No Tina on screen: this is the view a person would be looking at
+   before reaching for anything.
+2. **The one command.** `tina dispatch --track bug --limit 10`, piped live
+   through `jq` for one line per finished ticket. A real dispatch and ten real
+   runs, not `--dry-run`. The pipe is on screen because it is a selling point:
+   the log is structured, so it is filterable.
+3. **The review queue.** `tina status --track bug` reports `unclaimed: 0` and
+   `in flight: 10` off two live tracker queries, and `./queue.sh prs` shows the
+   ten pull requests. Humans review them; the factory does not merge its own
+   work.
+4. **The closer.** A static caption pointing at `--dry-run` and the repo. It is
+   a caption and not a command — after beat 2 every issue is claimed, so a
+   `no:assignee` preview would match nothing.
+
+Beat 3's `tina status` redirects stdout on screen. Tina's two output streams are
+separate by design (`tina.log` owns stdout, `tina.output` owns stderr), and the
+counts are the stderr half; sending the JSON stream to `/dev/null` is what keeps
+them readable at 98 columns instead of buried under wrapped `httpx` log lines.
 
 ## Why a stub
 
@@ -28,27 +53,46 @@ only environment variables the shipped adapter already reads:
 
 The URLs in the recording therefore read `http://127.0.0.1:<port>/…`. That is
 the honest cost of a demo you can re-record yourself: the run is real, the
-tracker is local. `verified: true` in the run record is computed by
-`tina.verify` fetching the artifact URL the agent reported — the stub serves it,
-so the check is a real check.
+tracker is local.
+
+The pull requests are the other half of that, and they are real server state
+rather than printed props. `agent.py` POSTs each one to the stub, which assigns
+the number itself and hands back an `html_url`; the agent reports that URL and
+does not get to invent one. The stub then serves `/{owner}/{name}/pull/{n}` for
+those numbers **and 404s every other number**, so `verified: true` in the run
+record — computed by `tina.verify` fetching the URL the agent reported — is a
+real check that a real pull request exists. An agent naming a plausible URL it
+never created comes back `verified: false`, which is exactly the failure
+verification exists to catch. `./queue.sh prs` reads the same list back off the
+stub, so beat 3 shows what beat 2 actually created.
 
 ## Files
 
 | File | Role |
 |------|------|
 | `record.sh` | The entrypoint: stub up, record, render, stub down. |
-| `demo.sh` | The recorded session — the four commands, echoed then run. |
-| `stub_server.py` | The local GitHub REST API. stdlib only. |
-| `agent.py` | The fake harness: reads the prompt, writes `outcome.json`. |
+| `demo.sh` | The recorded session — the four beats, each command echoed then run. |
+| `queue.sh` | The tracker views: `queue.sh bugs` and `queue.sh prs`. curl and jq only. |
+| `stub_server.py` | The local GitHub REST API, issues and pull requests. stdlib only. |
+| `agent.py` | The fake harness: reads the work item, opens one PR, writes `outcome.json`. |
 | `tina.toml` | The demo track: one GitHub source, one fake harness. |
 | `tracks/triage/SKILL.md` | Tina ships no tracks; this is one to put in the prompt. |
 
-`record.sh` copies `tina.toml` and `tracks/` into a temporary directory and
-records there, so the run leaves nothing behind in the checkout and the session
-needs no `--config` flag on screen.
+`record.sh` copies `tina.toml`, `queue.sh` and `tracks/` into a temporary
+directory and records there, so the run leaves nothing behind in the checkout
+and the session needs neither a `--config` flag nor a path on `./queue.sh`.
+
+`agent.py` writes nothing to stdout. Stdout is Tina's JSON log stream, which
+beat 2 pipes through `jq`, and one non-JSON line there aborts the pipe;
+diagnostics go to stderr.
 
 ## Changing the demo
 
 Terminal geometry, font size, idle-time limit and the gif's size budget are all
 pinned at the top of `record.sh`. Nothing outside this directory needs editing
 to re-record — the gif is the only file written elsewhere.
+
+If the gif comes in over budget, the levers in order are: drop `WORK_SECONDS` in
+`agent.py`, lower `agg`'s `--fps-cap`, then trim decoration from `queue.sh`.
+Leave `COLS` and `ROWS` alone — they set the gif's dimensions at a fixed README
+position.
