@@ -38,7 +38,7 @@ This approach scales your attention better than having 5 simultaneous agent sess
 A track is `Source -> Skill -> Result`.
 
 ```toml
-harness = "pi"        # selects [harnesses.pi]; `executor` works the same way
+harness = "pi"      
 executor = "local"
 
 [harnesses.pi]
