@@ -1,0 +1,80 @@
+# Config for the volume demo -- eight component queues, one track each. Not a
+# template to copy: the harness is a fake agent and the source points at
+# demo/stub_server.py, so nothing here touches a real tracker. See demo/README.md.
+#
+# `record.sh volume` copies this in as the working directory's `tina.toml`, so
+# the on-screen commands carry no `--config` and demo/tina.toml cannot regress.
+#
+# Why eight tables and not one shared query with eight dispatchers on it: eight
+# dispatchers against the same query all take the same `items[:125]` and would
+# work every ticket eight times. With one bot identity `GitHubSource.claim`
+# cannot reject the duplicates either -- a second worker assigning the same bot
+# is still the sole assignee, so the re-read passes (ADR-004's accepted race).
+# Exactly-once here comes from the mechanism that provides it in production:
+# disjoint queries, one per component queue, each on its own schedule (ADR-002).
+
+harness = "demo"
+executor = "local"
+tracks_dir = "tracks"
+
+# `record.sh` puts demo/ on PYTHONPATH, so `-m agent` resolves to demo/agent.py
+# no matter which directory the run happens in -- the harness runs with its cwd
+# set to Tina's temporary workdir.
+[harnesses.demo]
+command = ["python3", "-m", "agent", "{prompt_file}", "{outcome_dir}"]
+
+[bug-api]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:api"
+track = "triage"
+result = "github:pr"
+
+[bug-web]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:web"
+track = "triage"
+result = "github:pr"
+
+[bug-auth]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:auth"
+track = "triage"
+result = "github:pr"
+
+[bug-data]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:data"
+track = "triage"
+result = "github:pr"
+
+[bug-infra]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:infra"
+track = "triage"
+result = "github:pr"
+
+[bug-jobs]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:jobs"
+track = "triage"
+result = "github:pr"
+
+[bug-sdk]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:sdk"
+track = "triage"
+result = "github:pr"
+
+[bug-cli]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug label:cli"
+track = "triage"
+result = "github:pr"

@@ -17,6 +17,13 @@ Two rules it lives by:
 
 Invoked as `python3 -m agent {prompt_file} {outcome_dir}` from
 `[harnesses.demo]`; `record.sh` puts this directory on `PYTHONPATH`.
+
+Two environment variables shape it, both defaulting to the simple demo's
+behaviour so `./demo/record.sh` with no arguments is unaffected:
+
+    TINA_DEMO_AGENT_SLEEP     seconds of pretend work per run (default 0.35)
+    TINA_DEMO_ESCALATE_EVERY  report `needs_human` on every Nth ticket number
+                              (default 0, meaning never)
 """
 
 from __future__ import annotations
@@ -36,8 +43,16 @@ TIMEOUT = 10.0
 
 #: The fake harness's stand-in for doing the work. Its only job is to make ten
 #: runs watchable rather than a sub-second flash -- this is the harness's own
-#: runtime, not staged output.
-WORK_SECONDS = 0.35
+#: runtime, not staged output. The volume demo exports `0`: at 1,000 tickets the
+#: counter carries legibility, and 0.35 s each would add ~44 s to every
+#: re-record for nothing.
+WORK_SECONDS = float(os.environ.get("TINA_DEMO_AGENT_SLEEP") or 0.35)
+
+#: Escalate every Nth ticket instead of resolving it, keyed on the ticket number
+#: so the split is computed per run rather than edited in afterwards. Unset or
+#: `0` means never, which is what keeps the simple demo's ten lines all
+#: `resolved · verified` -- one of its issues is a multiple of 30.
+ESCALATE_EVERY = int(os.environ.get("TINA_DEMO_ESCALATE_EVERY") or 0)
 
 #: `tina.prompt.build` embeds the WorkItem as JSON in the prompt's one fenced
 #: block, so the agent reads the ticket from there rather than hardcoding it.
@@ -94,6 +109,30 @@ def failure(reason: str) -> dict[str, object]:
     return {"outcome": "failed", "details": reason, "artifacts": []}
 
 
+def escalates(number: int) -> bool:
+    """Whether this ticket is one the harness hands back to a person."""
+    return ESCALATE_EVERY > 0 and number % ESCALATE_EVERY == 0
+
+
+def escalation(item: dict[str, Any]) -> dict[str, object]:
+    """A `needs_human` report: no artifact, because nothing was produced.
+
+    The factory escalating is the quality half of the volume demo, so this path
+    opens no pull request at all rather than opening one and hedging in
+    `details`. `tina.verify` leaves `verified` as None here -- there is nothing
+    to fetch back -- and the audit asserts that rather than papering over it.
+    """
+    return {
+        "outcome": "needs_human",
+        "details": (
+            f"#{item['id']} ({item.get('title', '')}) does not reproduce against main from the "
+            "report alone: the reproduction steps are ambiguous about which client sent the "
+            "request. Guessing would produce a fix nobody can verify. Escalating."
+        ),
+        "artifacts": [],
+    }
+
+
 def main(argv: list[str]) -> int:
     prompt_file, outcome_dir = Path(argv[1]), Path(argv[2])
     prompt = prompt_file.read_text(encoding="utf-8")
@@ -104,6 +143,12 @@ def main(argv: list[str]) -> int:
     api_base = os.environ.get("GITHUB_API_URL", "http://127.0.0.1:8765")
     item = work_item(prompt)
     time.sleep(WORK_SECONDS)
+
+    if escalates(int(item["id"])):
+        (outcome_dir / "outcome.json").write_text(
+            json.dumps(escalation(item), indent=2), encoding="utf-8"
+        )
+        return 0
 
     try:
         pull_request = open_pull_request(api_base, item)
