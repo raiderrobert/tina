@@ -117,6 +117,12 @@ head -n "$example_lines" "$DIR/tina.toml" |
 if ! diff -u "$EXAMPLE_CONFIG" "$ROUNDTRIP" >&2; then
     die "the recording's config is no longer the published example -- the gif would stop being evidence for examples/bug-triage/"
 fi
+# ...and everything past the example's own lines is the overlay and nothing
+# else, which is the other half of "one line changed, one harness table added".
+tail -n "+$((example_lines + 1))" "$DIR/tina.toml" >"$ROUNDTRIP"
+if ! diff -u "$OVERLAY" "$ROUNDTRIP" >&2; then
+    die "the recording's config carries something past the example that is not demo/overlay.toml"
+fi
 
 # 6. The stub serves exactly one repo, so an example naming another one would
 #    record a screenful of 404s.
