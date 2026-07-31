@@ -38,6 +38,17 @@ separate by design (`tina.log` owns stdout, `tina.output` owns stderr), and the
 counts are the stderr half; sending the JSON stream to `/dev/null` is what keeps
 them readable at 98 columns instead of buried under wrapped `httpx` log lines.
 
+## The track is not here
+
+The config and the skill the recording runs live in
+[`examples/bug-triage/`](../examples/bug-triage/), not in this directory.
+`demo/` holds the machinery that makes the recording hermetic — a stub tracker,
+a fake harness, asciinema plumbing — and none of it is worth copying. The track
+is, so it is published where someone who just watched the gif would look for it.
+
+Keeping one copy is also what lets the gif be evidence: there is nothing under
+`demo/` for the published example to drift away from.
+
 ## Why a stub
 
 `tina run` claims a work item, and `GitHubSource.claim()` POSTs an assignee to
@@ -72,15 +83,25 @@ stub, so beat 3 shows what beat 2 actually created.
 |------|------|
 | `record.sh` | The entrypoint: stub up, record, render, stub down. |
 | `demo.sh` | The recorded session — the four beats, each command echoed then run. |
+| `workdir.sh` | Builds the recording's working directory from the example, and asserts it still matches. |
+| `overlay.toml` | The one thing the recording adds to the example's config: the fake harness. |
 | `queue.sh` | The tracker views: `queue.sh bugs` and `queue.sh prs`. curl and jq only. |
 | `stub_server.py` | The local GitHub REST API, issues and pull requests. stdlib only. |
 | `agent.py` | The fake harness: reads the work item, opens one PR, writes `outcome.json`. |
-| `tina.toml` | The demo track: one GitHub source, one fake harness. |
-| `tracks/triage/SKILL.md` | Tina ships no tracks; this is one to put in the prompt. |
 
-`record.sh` copies `tina.toml`, `queue.sh` and `tracks/` into a temporary
-directory and records there, so the run leaves nothing behind in the checkout
-and the session needs neither a `--config` flag nor a path on `./queue.sh`.
+`record.sh` builds a temporary working directory with `workdir.sh` and records
+there, so the run leaves nothing behind in the checkout and the session needs
+neither a `--config` flag nor a path on `./queue.sh`. That directory is not
+copied from anything in `demo/`: `workdir.sh` derives it from
+`examples/bug-triage/` plus `overlay.toml`, substituting the single `harness`
+line and appending `[harnesses.demo]`. It then reverses the substitution and
+diffs the result against the published example, and refuses to proceed if the
+recorded config is anything other than that file with exactly one line changed.
+`queue.sh` gets its repo and query from the same derivation rather than holding
+its own copy.
+
+`just check` runs `./demo/workdir.sh --check`, so that assertion is checked on
+every pull request and not only when someone re-records.
 
 `agent.py` writes nothing to stdout. Stdout is Tina's JSON log stream, which
 beat 2 pipes through `jq`, and one non-JSON line there aborts the pipe;

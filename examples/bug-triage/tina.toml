@@ -1,0 +1,22 @@
+# The track the README recording runs: open, unassigned bugs in one repo,
+# triaged by one skill, each ending in a pull request a person reviews.
+#
+# `harness` and `executor` select an adapter by name; the adapters themselves
+# are defined in the plural tables below, because TOML will not let one key be
+# both a string and a table.
+
+harness = "pi"
+executor = "local"
+tracks_dir = "tracks"
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+# Every other table is a track: source -> skill -> result.
+
+[bug]
+source = "github"
+repo = "acme/api"
+query = "repo:acme/api is:issue is:open no:assignee label:bug"
+track = "triage"
+result = "github:pr"

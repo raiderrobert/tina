@@ -74,7 +74,8 @@ src/tina/
 tests/                 # conftest.py + unit/ (per-module) + integration/ (through the CLI)
 docs/architecture.md   # System design
 docs/adr/              # Architecture decision records
-examples/tina.toml     # Worked configuration
+examples/tina.toml     # Worked configuration: every configurable surface in one file
+examples/bug-triage/   # One complete track — the one the README recording runs
 Dockerfile.reference   # Reference consumer image; documentation, not a build
 justfile               # Every check, in one place
 ```
