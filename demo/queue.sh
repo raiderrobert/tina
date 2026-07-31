@@ -7,15 +7,22 @@
 #     ./queue.sh bugs    open, unassigned bugs -- the same query the bug track runs
 #     ./queue.sh prs     the pull requests the stub actually has on file
 #
-# Reads GITHUB_API_URL, which record.sh points at the stub.
+# Reads GITHUB_API_URL, which record.sh points at the stub, and DEMO_REPO and
+# DEMO_QUERY, which record.sh derives from examples/bug-triage/tina.toml.
 set -eu
 
 : "${GITHUB_API_URL:=http://127.0.0.1:8765}"
 
-REPO=acme/api
-# The `bug` track's query, verbatim from demo/tina.toml. Beat 1 shows the same
-# rows dispatch is about to claim, not a different list that happens to agree.
-QUERY="repo:$REPO is:issue is:open no:assignee label:bug"
+# The repo and the query come from examples/bug-triage/tina.toml, read out of
+# the derived config by workdir.sh and exported by record.sh. There is no
+# literal fallback here on purpose: a fallback is a second copy of the track
+# with extra steps, and beat 1 would be free to show rows dispatch is not about
+# to claim.
+: "${DEMO_REPO:?queue.sh gets its repo and query from the example config; run it through record.sh}"
+: "${DEMO_QUERY:?queue.sh gets its repo and query from the example config; run it through record.sh}"
+
+REPO="$DEMO_REPO"
+QUERY="$DEMO_QUERY"
 
 bugs() {
     printf '%s  open bugs, no assignee\n' "$REPO"

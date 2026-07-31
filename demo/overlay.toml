@@ -1,0 +1,5 @@
+# Appended to a copy of examples/bug-triage/tina.toml by demo/workdir.sh. It
+# supplies the fake harness the recording runs and nothing else: the track, the
+# query, the skill and the result all come from the example.
+[harnesses.demo]
+command = ["python3", "-m", "agent", "{prompt_file}", "{outcome_dir}"]
