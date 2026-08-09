@@ -11,6 +11,7 @@ set -eu
 
 DEMO_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH='' cd -- "$DEMO_DIR/.." && pwd)
+EXAMPLE_DIR="$ROOT/examples/bug-triage"
 GIF="$ROOT/tina-demo.gif"
 BUDGET=600000
 
@@ -38,6 +39,13 @@ for tool in asciinema agg python3 jq curl; do
         exit 1
     }
 done
+
+# The recording runs the published example, not a copy of it. Checked here so a
+# missing example fails before the stub starts; workdir.sh checks the files.
+[ -d "$EXAMPLE_DIR" ] || {
+    echo "record.sh: $EXAMPLE_DIR is missing -- there is no track to record" >&2
+    exit 1
+}
 
 # Exported before the stub starts, because the stub reads it too: it is the
 # author it reports on the pull requests the agent opens, and the login tina
@@ -79,12 +87,21 @@ if [ -z "${TINA:-}" ]; then
 fi
 export TINA
 
-# The recording runs in a scratch copy of this directory, so `tina.toml` is
-# found by default, the on-screen command is `./queue.sh` with no path, and the
-# checkout stays clean.
-cp "$DEMO_DIR/tina.toml" "$WORK/tina.toml"
-cp "$DEMO_DIR/queue.sh" "$WORK/queue.sh"
-cp -R "$DEMO_DIR/tracks" "$WORK/tracks"
+# The working directory is derived from examples/bug-triage/, never copied from
+# a second config under demo/: workdir.sh substitutes the one `harness` line,
+# appends overlay.toml's fake harness, and then asserts the round trip back is
+# the published example byte for byte. That assertion is why the gif is evidence
+# for the example -- it runs here, before asciinema and before the stub is
+# needed, so a divergence costs a second and produces no gif. Recording in a
+# scratch directory also means `tina.toml` is found by default, the on-screen
+# command is `./queue.sh` with no path, and the checkout stays clean.
+sh "$DEMO_DIR/workdir.sh" "$WORK"
+
+# The track's repo and query, read out of the derived config by workdir.sh, so
+# queue.sh shows the rows dispatch is about to claim rather than its own copy.
+. "$WORK/.demo-env"
+export DEMO_REPO DEMO_QUERY
+
 cd "$WORK"
 
 asciinema rec --overwrite --quiet --headless --return \

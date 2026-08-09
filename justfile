@@ -14,8 +14,8 @@ default:
 setup:
     uv sync --all-extras
 
-# Run all checks: format check, lint, type check, tests
-check: fmt-check lint types test
+# Run all checks: format check, lint, type check, example check, tests
+check: fmt-check lint types example-check test
 
 # Check formatting without writing changes
 fmt-check:
@@ -28,6 +28,15 @@ lint:
 # Type check
 types:
     uv run ty check
+
+# Assert the recording's config is still the published example
+#
+# The gif is evidence for examples/bug-triage/ only while the recording runs
+# that track. Re-recording would catch a divergence too, but it needs asciinema
+# and agg, which CI does not have; this needs only sh, sed, grep, diff and cp,
+# so the honesty rule is checked on every PR.
+example-check:
+    ./demo/workdir.sh --check
 
 # Run tests
 test *args:

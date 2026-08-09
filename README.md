@@ -9,6 +9,8 @@ pip install tina-cli
 
 ![tina demo](tina-demo.gif)
 
+The track in that recording is [`examples/bug-triage/`](examples/bug-triage/) — the config, the skill, and what each key does.
+
 
 ## How is Tina different from an agent harness? 
 Tina is an orchestrator of sort.
