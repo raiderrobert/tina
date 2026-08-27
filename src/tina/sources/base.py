@@ -72,6 +72,24 @@ class Source(Protocol):
         """
         ...
 
+    def annotate(self, item: WorkItem, comment: str) -> None:
+        """Leave a comment about a run on the item.
+
+        A lifecycle write, not a result write (ADR-013). Best-effort: a
+        failure is logged and swallowed, never raised — a reporting hiccup
+        must not mask the failure it reports.
+        """
+        ...
+
+    def block(self, item: WorkItem) -> None:
+        """Apply the exclusion marker so the configured query stops matching.
+
+        Idempotent — blocking an already-blocked item is a no-op — and
+        best-effort, like `annotate`. The marker only works when the track
+        query excludes it; Tina never rewrites queries.
+        """
+        ...
+
 
 class SourceError(TinaError, RuntimeError):
     """A source adapter could not talk to its tracker."""

@@ -138,6 +138,9 @@ class TrackConfig(BaseModel):
     result: str | None = None
     # GitHub Issues needs to know which repo the query and claims apply to.
     repo: str | None = None
+    # The exclusion marker `block()` applies — a label on both trackers. The
+    # track query has to exclude it, or blocked items match again (ADR-013).
+    blocked_label: str = Field(default="tina-blocked", min_length=1)
 
 
 class Config(BaseModel):

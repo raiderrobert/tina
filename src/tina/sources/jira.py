@@ -12,8 +12,11 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field, model_validator
 
+from tina.log import get_logger
 from tina.models import WorkItem
 from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
+
+log = get_logger(__name__)
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
@@ -81,9 +84,11 @@ class JiraSource:
         client: httpx.Client | None = None,
         base_url: str | None = None,
         bot_account_id: str | None = None,
+        blocked_label: str = "tina-blocked",
     ) -> None:
         self.base_url = (base_url or require_env("JIRA_BASE_URL", "jira")).rstrip("/")
         self._bot_account_id = bot_account_id
+        self.blocked_label = blocked_label
         if client is None:
             email = require_env("JIRA_EMAIL", "jira")
             token = require_env("JIRA_API_TOKEN", "jira")
@@ -145,6 +150,36 @@ class JiraSource:
         """
         return self.query(claimed_jql(q, self.bot_account_id))
 
+    def annotate(self, item: WorkItem, comment: str) -> None:
+        """Comment on the issue. Best-effort per the contract: log, never raise."""
+        try:
+            self._request(
+                "POST",
+                f"{ISSUE_PATH}/{item.id}/comment",
+                json={"body": adf_document(comment)},
+            )
+        except SourceError as exc:
+            log.warning("annotate failed", extra={"item": item.id, "error": str(exc)})
+            return
+        log.info("item annotated", extra={"item": item.id})
+
+    def block(self, item: WorkItem) -> None:
+        """Add the exclusion label, `tina-blocked` unless the track overrides it.
+
+        Jira's label add is a set add, so an already-blocked issue is a no-op
+        rather than an error. Best-effort, like `annotate`.
+        """
+        try:
+            self._request(
+                "PUT",
+                f"{ISSUE_PATH}/{item.id}",
+                json={"update": {"labels": [{"add": self.blocked_label}]}},
+            )
+        except SourceError as exc:
+            log.warning("block failed", extra={"item": item.id, "error": str(exc)})
+            return
+        log.info("item blocked", extra={"item": item.id, "label": self.blocked_label})
+
     def _issue(self, item_id: str) -> Issue:
         path = f"{ISSUE_PATH}/{item_id}"
         response = self._request("GET", path, params={"fields": ",".join(FIELDS)})
@@ -194,6 +229,23 @@ def claimed_jql(q: str, account_id: str) -> str:
             fix="Add `AND assignee IS EMPTY` to the track query so dispatch skips claimed issues.",
         )
     return rewritten
+
+
+def adf_document(text: str) -> dict[str, Any]:
+    """Wrap plain text in the minimal Atlassian Document Format envelope.
+
+    One paragraph per line — the write-side counterpart of `render_adf`. An
+    empty line becomes an empty paragraph, because a text node with empty
+    text is invalid ADF.
+    """
+    lines = text.splitlines() or [""]
+    return {"type": "doc", "version": 1, "content": [_paragraph(line) for line in lines]}
+
+
+def _paragraph(line: str) -> dict[str, Any]:
+    if not line:
+        return {"type": "paragraph"}
+    return {"type": "paragraph", "content": [{"type": "text", "text": line}]}
 
 
 def render_adf(node: Any) -> str:

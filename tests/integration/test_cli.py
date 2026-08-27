@@ -68,6 +68,8 @@ class FakeSource:
         self.holder = holder
         self.held = list(held or [])
         self.claims: list[str] = []
+        self.annotations: list[tuple[str, str]] = []
+        self.blocked: list[str] = []
 
     def query(self, q: str) -> list[WorkItem]:
         self.queried = q
@@ -86,6 +88,12 @@ class FakeSource:
     def claimed(self, q: str) -> list[WorkItem]:
         self.claimed_query = q
         return list(self.held)
+
+    def annotate(self, item: WorkItem, comment: str) -> None:
+        self.annotations.append((item.id, comment))
+
+    def block(self, item: WorkItem) -> None:
+        self.blocked.append(item.id)
 
 
 class NoClaimSource(FakeSource):
