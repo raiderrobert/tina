@@ -60,3 +60,10 @@ repo = "acme/api"
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
 track = "triage"
 result = "github:issue-comment"
+
+# Optional: literal strings merged over the inherited environment for the
+# harness subprocess only — how a track skill's scripts get configured.
+# Uppercase names starting with a letter; TINA_* is reserved.
+# [bug.env]
+# TRIAGED_LABEL = "bot-triaged"
+# BOT_LOGINS = "bot-one,bot-two"

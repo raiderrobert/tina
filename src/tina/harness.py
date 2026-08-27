@@ -68,8 +68,14 @@ def run(
     workdir: Path,
     timeout: float | None = None,
     model: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> HarnessResult:
-    """Write the prompt, run the harness once, read whatever it left behind."""
+    """Write the prompt, run the harness once, read whatever it left behind.
+
+    `env` is the track's table, merged over the inherited environment for the
+    subprocess only — tina's own environment is never touched. Empty or None
+    inherits unchanged.
+    """
     prompt_file = write_prompt(prompt, workdir)
 
     command = config.command.render(prompt_file, workdir, model=model)
@@ -81,6 +87,7 @@ def run(
             check=False,
             cwd=workdir,
             timeout=timeout if timeout is not None else default_timeout(),
+            env=os.environ | env if env else None,
         )
     except subprocess.TimeoutExpired as exc:
         return HarnessResult(

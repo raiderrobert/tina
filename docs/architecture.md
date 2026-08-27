@@ -407,6 +407,14 @@ result = "github:issue-comment"
 Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name. Unknown keys are rejected rather than ignored.
 
+A track may carry an optional `[<track>.env]` table: literal strings merged
+over the inherited environment for the harness subprocess only. Track skills
+ship scripts, and those scripts read configuration from the environment —
+marker label names, bot identities, feature switches. Names are validated at
+load (uppercase letters, digits, and underscores, starting with a letter),
+and the `TINA_*` namespace is reserved. The values stay literals: a catalog
+of runner-provided values is a consumer concern.
+
 The work implementation this is derived from used a Jira-bound schema:
 
 ```toml

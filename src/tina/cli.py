@@ -385,7 +385,7 @@ def run_item(
     with tempfile.TemporaryDirectory(prefix="tina-") as tmp:
         workdir = Path(tmp)
         text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
-        result = harness.run(harness_config, text, workdir, model=track.model)
+        result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
 
     report = verify.verify(result.report)
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)

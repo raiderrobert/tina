@@ -852,6 +852,42 @@ def test_a_dry_run_surfaces_an_eligible_verdict(
     assert last_record(result.stdout)["matches"] is True
 
 
+# --- per-track env: the harness subprocess sees it; nothing else does --------
+
+
+@pytest.fixture
+def env_configured(project: Path) -> Path:
+    """The project config with a [vul.env] table, and an agent that checks it."""
+    project.write_text(project.read_text() + '\n[vul.env]\nTRIAGED_LABEL = "bot-triaged"\n')
+    script = project.parent / "agent.py"
+    script.write_text(
+        AGENT + 'import os\nassert os.environ["TRIAGED_LABEL"] == "bot-triaged", "env missing"\n'
+    )
+    return project
+
+
+def test_the_harness_subprocess_sees_the_track_env(
+    env_configured: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The fake agent itself asserts the variable, so a dropped table fails."""
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(env_configured)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent's asserts all passed"
+
+
+def test_dispatch_is_untouched_by_the_track_env(
+    env_configured: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The table is for the harness subprocess only; the dispatcher never reads it."""
+    _, executor = wired
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(env_configured)])
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1")]
+
+
 # --- on_failure: a bad run leaves a trace and stops matching -----------------
 
 RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]

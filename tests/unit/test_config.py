@@ -232,6 +232,45 @@ def test_claim_transition_under_claim_none_fails_fast(tmp_path: Path) -> None:
         config.load(write(tmp_path, text))
 
 
+def test_env_defaults_to_empty(tmp_path: Path) -> None:
+    """Tracks without the table are unaffected."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").env == {}
+
+
+def test_env_values_are_kept(tmp_path: Path) -> None:
+    text = MINIMAL + '\n[vul.env]\nTRIAGED_LABEL = "bot-triaged"\nBOT_LOGINS = "a,b"\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").env == {
+        "TRIAGED_LABEL": "bot-triaged",
+        "BOT_LOGINS": "a,b",
+    }
+
+
+@pytest.mark.parametrize("name", ["lower_case", "1LEADING_DIGIT", "_UNDERSCORE", "WITH-DASH"])
+def test_a_malformed_env_name_fails_at_load(tmp_path: Path, name: str) -> None:
+    """Uppercase alphanumerics and underscores, starting with a letter."""
+    text = MINIMAL + f'\n[vul.env]\n"{name}" = "x"\n'
+    with pytest.raises(config.ConfigError, match=rf"\[vul\].*{name}"):
+        config.load(write(tmp_path, text))
+
+
+def test_an_env_name_in_tinas_namespace_fails_at_load(tmp_path: Path) -> None:
+    """Colliding with a variable tina itself owns would change its behavior."""
+    text = MINIMAL + '\n[vul.env]\nTINA_CONTROL = "/tmp/x"\n'
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*TINA_CONTROL"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_non_string_env_value_fails_at_load(tmp_path: Path) -> None:
+    """Values are literal strings, never coerced."""
+    text = MINIMAL + "\n[vul.env]\nBOT_LIMIT = 5\n"
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*BOT_LIMIT"):
+        config.load(write(tmp_path, text))
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))

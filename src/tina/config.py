@@ -45,6 +45,12 @@ _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 _SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
+#: The namespace of environment variables tina itself owns (TINA_CONTROL,
+#: TINA_HARNESS_TIMEOUT, ...). A track shadowing one would change tina's
+#: behavior out from under the deployment, so the collision fails at load.
+RESERVED_ENV_PREFIX = "TINA_"
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
 
 class ConfigError(TinaError, ValueError):
     """Raised for anything wrong with a config file. Always names the file."""
@@ -164,6 +170,9 @@ class TrackConfig(BaseModel):
     # A Jira transition applied after a successful claim, so the queued status
     # stays truthful and humans can requeue by transition.
     claim_transition: str | None = None
+    # Literal strings merged over the inherited environment for the harness
+    # subprocess only — how a track skill's scripts get configured.
+    env: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_claim_policy(self) -> TrackConfig:
@@ -179,6 +188,21 @@ class TrackConfig(BaseModel):
                     'claim_transition cannot apply under claim = "none" — nothing is ever claimed'
                 )
         return self
+
+    @field_validator("env")
+    @classmethod
+    def _check_env_names(cls, value: dict[str, str]) -> dict[str, str]:
+        for name in value:
+            if not _ENV_NAME.fullmatch(name):
+                raise ValueError(
+                    f"env name {name!r} must be uppercase letters, digits, and"
+                    " underscores, starting with a letter"
+                )
+            if name.startswith(RESERVED_ENV_PREFIX):
+                raise ValueError(
+                    f"env name {name!r} collides with tina's own {RESERVED_ENV_PREFIX}* variables"
+                )
+        return value
 
     @field_validator("model")
     @classmethod
