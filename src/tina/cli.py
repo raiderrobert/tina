@@ -23,14 +23,10 @@ from tina.config import Config, ConfigError, TrackConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
 from tina.executors.base import Executor
-from tina.models import OutcomeReport, OutcomeStatus, RunRecord, WorkItem
+from tina.models import SWEEP_ITEM, OutcomeReport, OutcomeStatus, RunRecord, WorkItem
 from tina.sources.base import Source
 
 DEFAULT_CONFIG = Path("tina.toml")
-
-#: What a sweep run records where the item id would be. Stable, so anything
-#: grouping run records by item sees one series per sweep track.
-SWEEP_ITEM = "sweep"
 
 logger = log.get_logger("tina")
 
@@ -162,7 +158,13 @@ def dispatch_track(
     executor, not from a branch inside the loop that nobody took. The one thing
     it therefore cannot report is a `cloudrun` executor with no
     `[executors.cloudrun]` table — a table that is present but incomplete still
-    fails at config load, whichever mode this runs in.
+    fails at config load, whichever mode this runs in. Having no executor, it
+    also cannot count in-flight workers, so it assumes zero and says so.
+
+    The budget is `max(0, min(--limit, policy) − in flight)` (ADR-016): the
+    limit caps live workers, not launches per call, or a 15-minute scheduler
+    multiplies the knob by every hour a worker runs. Items already in flight
+    are skipped rather than re-enqueued — the dedupe `claim = "none"` needs.
     """
     track = config.track(track_name)
     _require_enabled(config, track)
@@ -183,7 +185,9 @@ def dispatch_track(
         return
 
     executor = executor or executors.build(config)
-    items = source.query(track.query)[: max(effective, 0)]
+    in_flight = executor.running(track.name)
+    budget = max(0, effective - len(in_flight))
+    items = source.query(track.query)
     logger.info(
         "dispatching",
         extra={
@@ -191,12 +195,22 @@ def dispatch_track(
             "limit": limit,
             "effective_limit": effective,
             "limit_origin": limit_origin,
+            "in_flight": len(in_flight),
+            "budget": budget,
             "matched": len(items),
         },
     )
+    running = set(in_flight)
+    launched = 0
     for item in items:
+        if launched >= budget:
+            break
+        if item.id in running:
+            logger.info("already in flight", extra=_item_fields(track.name, item, config.executor))
+            continue
         executor.enqueue(track.name, item.id)
         logger.info("enqueued", extra=_item_fields(track.name, item, config.executor))
+        launched += 1
 
 
 def _require_enabled(config: Config, track: TrackConfig) -> None:
@@ -254,28 +268,59 @@ def _dispatch_sweep(
 
     `--limit` does not apply: a sweep has no queue to take more of, and the
     skill discovers its own work. The control file still gates it — a sweep
-    launch counts as one worker, so `max_concurrency = 0` launches nothing.
+    launch counts as one worker, so `max_concurrency = 0` launches nothing —
+    and so does a sweep worker still in flight, or an hour-long sweep on a
+    15-minute scheduler stacks four deep (ADR-016).
     """
     if policy.max_concurrency is not None and policy.max_concurrency < 1:
         workers, limit_origin = 0, "max_concurrency"
     else:
         workers, limit_origin = 1, "sweep"
-    fields = {
-        "track": track.name,
-        "mode": "sweep",
-        "workers": workers,
-        "limit_origin": limit_origin,
-    }
     if dry_run:
+        fields = _sweep_dispatch_fields(track.name, workers, limit_origin, in_flight=0)
         logger.info("dispatching", extra=fields | {"dry_run": True})
         _preview_sweep(config, track, workers, policy)
         return
 
     executor = executor or executors.build(config)
-    logger.info("dispatching", extra=fields)
+    in_flight = executor.running(track.name)
+    if workers and in_flight:
+        workers, limit_origin = 0, "in_flight"
+    logger.info(
+        "dispatching",
+        extra=_sweep_dispatch_fields(track.name, workers, limit_origin, len(in_flight)),
+    )
     if workers:
         executor.enqueue(track.name)
         logger.info("enqueued", extra=_sweep_fields(track.name, config.executor))
+    elif in_flight:
+        logger.info("already in flight", extra=_sweep_fields(track.name, config.executor))
+
+
+def _sweep_dispatch_fields(
+    track: str, workers: int, limit_origin: str, in_flight: int
+) -> dict[str, Any]:
+    """The sweep `dispatching` record, one shape across real and dry runs."""
+    return {
+        "track": track,
+        "mode": "sweep",
+        "workers": workers,
+        "limit_origin": limit_origin,
+        "in_flight": in_flight,
+    }
+
+
+def _preview_in_flight(config: Config) -> None:
+    """Admit the zero a preview assumes, when it is an assumption at all.
+
+    A dry run builds no executor, so it cannot count in-flight workers.
+    Local workers finish inside `enqueue`, making zero exact and the line
+    noise; any other executor would have been asked over an API.
+    """
+    if config.executor != "local":
+        output.would(
+            f"Would assume 0 workers in flight — counting them would call the {config.executor} API"
+        )
 
 
 def _preview_sweep(
@@ -289,6 +334,7 @@ def _preview_sweep(
             f"Would apply control policy from {policy.origin}: max_concurrency {throttle},"
             f" sweep workers {workers}"
         )
+    _preview_in_flight(config)
     if workers:
         output.would(f"Would enqueue one sweep worker via {config.executor} — no query would run")
         logger.info(
@@ -334,7 +380,10 @@ def _preview(
 
     The policy line appears only when a control plane is configured: with
     defaults there is no policy to report, and the preview stays byte-for-byte
-    what it was before the control plane existed.
+    what it was before the control plane existed. The in-flight line follows
+    the same discipline: it appears only when the assumption could be wrong —
+    counting non-local workers is an API call a dry run never makes, whereas
+    local workers are synchronous and zero is exact.
     """
     logger.info(
         "dispatching",
@@ -343,6 +392,8 @@ def _preview(
             "limit": limit,
             "effective_limit": effective,
             "limit_origin": limit_origin,
+            "in_flight": 0,
+            "budget": max(effective, 0),
             "matched": len(items),
             "dry_run": True,
         },
@@ -354,6 +405,7 @@ def _preview(
             f"Would apply control policy from {policy.origin}: max_concurrency {throttle},"
             f" effective limit {effective} (from {limit_origin})"
         )
+    _preview_in_flight(config)
     for item in items:
         line = f"Would enqueue {item.id} via {config.executor}"
         output.would(f"{line} — {item.title}" if item.title else line)

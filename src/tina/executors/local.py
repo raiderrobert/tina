@@ -42,3 +42,8 @@ class LocalExecutor:
         """None. There is no log console, and inventing a file path would be
         worse than admitting it."""
         return None
+
+    def running(self, track: str) -> list[str]:
+        """Empty, honestly: `enqueue` blocks until the worker exits, so none
+        can still be in flight by the time dispatch asks."""
+        return []

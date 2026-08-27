@@ -9,6 +9,8 @@ tolerated failure mode (architecture §9).
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -16,7 +18,14 @@ from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 from tina.log import get_logger
 from tina.models import WorkItem
-from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
+from tina.sources.base import (
+    ClaimPrognosis,
+    RetryRule,
+    SourceError,
+    parse_payload,
+    require_env,
+    send_with_retry,
+)
 
 log = get_logger(__name__)
 
@@ -26,6 +35,18 @@ ACCEPT = "application/vnd.github+json"
 
 #: The qualifier a track query uses to exclude claimed issues.
 NO_ASSIGNEE = "no:assignee"
+
+#: GitHub reports its secondary rate limit as a 403 whose body carries this
+#: documented phrase. Back-to-back searches trip it easily.
+SECONDARY_RATE_LIMIT = "secondary rate limit"
+
+#: The secondary rate limit is retried once after the documented minimum wait
+#: — never a hammer; the second refusal is loud. Gateway errors get a short
+#: ladder. Every other 4xx is permanent and raises immediately.
+RETRY_RULES = (
+    RetryRule(status=frozenset({403}), waits=(60.0,), marker=SECONDARY_RATE_LIMIT),
+    RetryRule(status=frozenset({502, 503, 504}), waits=(2.0, 8.0)),
+)
 
 
 class SearchParams(BaseModel):
@@ -98,10 +119,12 @@ class GitHubSource:
         blocked_label: str = "tina-blocked",
         claim_policy: str = "assign",
         claim_label: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if not repo:
             raise SourceError('github source requires repo = "owner/name" on the track')
         self.repo = repo
+        self._sleep = sleep
         self.blocked_label = blocked_label
         self.claim_policy = claim_policy
         self.claim_label = claim_label
@@ -250,7 +273,13 @@ class GitHubSource:
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         url = f"{self.api_base}{path}"
         try:
-            response = self.client.request(method, url, **kwargs)
+            response = send_with_retry(
+                lambda: self.client.request(method, url, **kwargs),
+                RETRY_RULES,
+                self._sleep,
+                "github",
+                f"{method} {path}",
+            )
         except httpx.HTTPError as exc:
             raise SourceError(f"github: {method} {path} failed: {exc}") from exc
         if response.status_code >= 400:

@@ -158,6 +158,83 @@ def test_http_error_is_a_source_error(item: WorkItem) -> None:
         source(handler).get("42")
 
 
+# --- transient retry: the failures that look like an empty backlog -----------
+
+SECONDARY = "You have exceeded a secondary rate limit. Please wait a few minutes."
+
+
+def test_a_secondary_rate_limit_is_retried_once_after_the_documented_wait() -> None:
+    responses = iter([httpx.Response(403, text=SECONDARY)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses, httpx.Response(200, json={"items": [issue()]}))
+
+    waits: list[float] = []
+    items = source(handler, sleep=waits.append).query("repo:acme/api no:assignee")
+
+    assert [i.id for i in items] == ["42"]
+    assert waits == [60.0]
+
+
+def test_a_second_secondary_rate_limit_raises_with_the_original_message() -> None:
+    """One retry, never a hammer — the second refusal is loud."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text=SECONDARY)
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="403.*secondary rate limit"):
+        source(handler, sleep=waits.append).query("repo:acme/api no:assignee")
+
+    assert waits == [60.0]
+
+
+def test_gateway_errors_are_retried_on_a_short_ladder() -> None:
+    responses = iter([httpx.Response(502), httpx.Response(503)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses, httpx.Response(200, json=issue()))
+
+    waits: list[float] = []
+    assert source(handler, sleep=waits.append).get("42").id == "42"
+    assert waits == [2.0, 8.0]
+
+
+def test_a_persistent_gateway_error_raises_after_the_ladder() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream connect error")
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="503: upstream connect error"):
+        source(handler, sleep=waits.append).get("42")
+
+    assert waits == [2.0, 8.0]
+
+
+def test_an_ordinary_403_is_not_retried() -> None:
+    """Only the documented marker means the rate limit; a plain 403 is permanent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Resource not accessible by integration")
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="403"):
+        source(handler, sleep=waits.append).get("42")
+
+    assert waits == []
+
+
+def test_other_4xx_are_never_retried() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="not found")
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="404"):
+        source(handler, sleep=waits.append).get("42")
+
+    assert waits == []
+
+
 def test_an_issue_without_a_number_is_a_source_error() -> None:
     """Nothing can be claimed or linked without one."""
 

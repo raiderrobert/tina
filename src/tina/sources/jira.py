@@ -7,6 +7,8 @@ being empty, then confirmed by re-reading the issue.
 from __future__ import annotations
 
 import re
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -14,13 +16,28 @@ from pydantic import BaseModel, Field, model_validator
 
 from tina.log import get_logger
 from tina.models import WorkItem
-from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
+from tina.sources.base import (
+    ClaimPrognosis,
+    RetryRule,
+    SourceError,
+    parse_payload,
+    require_env,
+    send_with_retry,
+)
 
 log = get_logger(__name__)
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
 FIELDS = ["summary", "description", "assignee", "status", "labels"]
+
+#: Server errors get a short ladder. A rate limit is retried once, honoring
+#: Retry-After up to the minute the ladder allows. Every other 4xx is
+#: permanent and raises immediately.
+RETRY_RULES = (
+    RetryRule(status=frozenset({500, 502, 503, 504}), waits=(2.0, 8.0)),
+    RetryRule(status=frozenset({429}), waits=(60.0,), retry_after=True),
+)
 
 #: The four spellings of "nobody holds this" that JQL accepts. `IS NOT EMPTY`
 #: deliberately does not match: `NOT` is neither `EMPTY` nor `NULL`, so the
@@ -102,8 +119,10 @@ class JiraSource:
         claim_policy: str = "assign",
         claim_label: str | None = None,
         claim_transition: str | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.base_url = (base_url or require_env("JIRA_BASE_URL", "jira")).rstrip("/")
+        self._sleep = sleep
         self._bot_account_id = bot_account_id
         self.blocked_label = blocked_label
         self.claim_policy = claim_policy
@@ -276,7 +295,13 @@ class JiraSource:
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         url = f"{self.base_url}{path}"
         try:
-            response = self.client.request(method, url, **kwargs)
+            response = send_with_retry(
+                lambda: self.client.request(method, url, **kwargs),
+                RETRY_RULES,
+                self._sleep,
+                "jira",
+                f"{method} {path}",
+            )
         except httpx.HTTPError as exc:
             raise SourceError(f"jira: {method} {path} failed: {exc}") from exc
         if response.status_code >= 400:

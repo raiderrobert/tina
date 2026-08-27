@@ -114,15 +114,19 @@ class NoClaimSource(FakeSource):
 
 
 class FakeExecutor:
-    def __init__(self) -> None:
+    def __init__(self, in_flight: list[str] | None = None) -> None:
         self.enqueued: list[tuple[str, str | None]] = []
         self.url: str | None = None
+        self.in_flight = list(in_flight or [])
 
     def enqueue(self, track: str, item_id: str | None = None) -> None:
         self.enqueued.append((track, item_id))
 
     def run_url(self) -> str | None:
         return self.url
+
+    def running(self, track: str) -> list[str]:
+        return list(self.in_flight)
 
 
 @pytest.fixture
@@ -471,6 +475,107 @@ def test_dispatch_with_no_matches_enqueues_nothing(project: Path) -> None:
     cli.dispatch_track(config.load(project), "vul", 5, source=FakeSource([]), executor=executor)
 
     assert executor.enqueued == []
+
+
+# --- the in-flight budget: live workers count against the limit ---------------
+
+
+def test_in_flight_workers_shrink_the_budget(project: Path, records: io.StringIO) -> None:
+    """Two of three slots are spoken for by workers a previous cycle launched."""
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor(in_flight=["VUL-8", "VUL-9"])
+
+    cli.dispatch_track(config.load(project), "vul", 3, source=source, executor=executor)
+
+    assert executor.enqueued == [("vul", "VUL-1")]
+    record = next(
+        line for line in json_lines(records.getvalue()) if line["message"] == "dispatching"
+    )
+    assert record["in_flight"] == 2
+    assert record["budget"] == 1
+
+
+def test_an_in_flight_item_is_skipped_and_named(project: Path, records: io.StringIO) -> None:
+    """The dedupe that claim = "none" tracks need: never a second worker per item."""
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor(in_flight=["VUL-2"])
+
+    cli.dispatch_track(config.load(project), "vul", 3, source=source, executor=executor)
+
+    assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-3")]
+    skipped = [
+        line for line in json_lines(records.getvalue()) if line["message"] == "already in flight"
+    ]
+    assert [line["item"] for line in skipped] == ["VUL-2"]
+
+
+def test_a_spent_budget_enqueues_nothing(project: Path, records: io.StringIO) -> None:
+    """In-flight at or above the limit floors the budget at zero, never below."""
+    source = FakeSource(items("VUL-1"))
+    executor = FakeExecutor(in_flight=["VUL-8", "VUL-9", "VUL-10"])
+
+    cli.dispatch_track(config.load(project), "vul", 2, source=source, executor=executor)
+
+    assert executor.enqueued == []
+    record = next(
+        line for line in json_lines(records.getvalue()) if line["message"] == "dispatching"
+    )
+    assert record["in_flight"] == 3
+    assert record["budget"] == 0
+
+
+def test_the_budget_starts_from_the_effective_limit(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """max(0, min(--limit, policy) − in flight): the throttle applies first."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 2")
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor(in_flight=["VUL-9"])
+
+    cli.dispatch_track(config.load(project), "vul", 5, source=source, executor=executor)
+
+    assert executor.enqueued == [("vul", "VUL-1")]
+
+
+def test_a_dry_run_reports_the_in_flight_count_it_assumed(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """A dry run builds no executor, so it assumes zero and records that."""
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
+    )
+    record = next(line for line in json_lines(result.stdout) if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert record["in_flight"] == 0
+
+
+def test_a_cloudrun_dry_run_says_it_assumed_zero_in_flight(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Counting cloudrun workers is an API call a dry run never makes — say so."""
+    text = project.read_text().replace(
+        'harness = "fake"', 'harness = "fake"\nexecutor = "cloudrun"'
+    )
+    project.write_text(text + '\n[executors.cloudrun]\nproject = "p"\nregion = "r"\njob = "j"\n')
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
+    )
+
+    assert result.exit_code == 0
+    assert "Would assume 0 workers in flight" in plain(result.stderr)
+
+
+def test_a_local_dry_run_keeps_quiet_about_in_flight(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Local workers are synchronous; zero is exact, not assumed, so no caveat."""
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
+    )
+
+    assert "in flight" not in plain(result.stderr)
 
 
 # --- dry run: everything a dispatch does except the last step ---------------
@@ -1524,6 +1629,26 @@ def test_max_concurrency_zero_holds_the_sweep(
     assert executor.enqueued == []
     assert record["workers"] == 0
     assert record["limit_origin"] == "max_concurrency"
+
+
+def test_a_live_sweep_worker_holds_the_next_sweep(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An hour-long sweep on a 15-minute scheduler must not stack four deep."""
+    executor = FakeExecutor(in_flight=[cli.SWEEP_ITEM])
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "reap", "--config", str(sweep_project)])
+    record = next(line for line in json_lines(result.stdout) if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert executor.enqueued == []
+    assert record["workers"] == 0
+    assert record["limit_origin"] == "in_flight"
+    assert any(
+        line["message"] == "already in flight" and line["item"] == "sweep"
+        for line in json_lines(result.stdout)
+    )
 
 
 def test_a_sweep_dispatch_dry_run_builds_no_executor(

@@ -102,6 +102,19 @@ Two roles, one image.
 **Dispatcher** runs the source query, takes up to N items, and enqueues N worker
 jobs through an executor. It never runs an agent.
 
+N is a budget over live workers, not launches per call:
+`max(0, min(--limit, max_concurrency) − in flight)`, where in flight is what
+the executor's `running()` reports for the track
+([ADR-016](adr/016-dispatch-budgets-by-live-executor-state.md)). Without the
+subtraction, a 15-minute scheduler launching the full limit against hour-long
+runs multiplies the knob by four to twelve. Items already in flight are
+skipped, not re-enqueued — the dedupe `claim = "none"` tracks need, since
+their query still matches an item a worker holds. The execution list is
+queried fresh each cycle and never stored; the same gate holds a sweep
+dispatch while its one worker is still out. A dry run builds no executor, so
+it assumes zero in flight and says so when that is an assumption rather than
+a fact.
+
 **Worker** takes a single work item identifier, claims it, runs the agent once,
 and records the outcome. One item = one run = one container = one log stream.
 
@@ -240,6 +253,17 @@ it as one search (`(query) AND key = <item>`, ORDER BY stripped); GitHub
 search has no number qualifier, so the adapter fetches the issue and
 re-checks the structured qualifiers in code.
 
+Transient tracker failures are retried inside the adapters' request layer
+rather than surfaced, because the failure is intermittent and looks like an
+empty backlog — the wrong thing to be ambiguous about. Each adapter declares a
+few retry rules: a status match, an optional body marker, and a ladder of
+waits. GitHub retries its secondary rate limit — a 403 carrying the documented
+marker — once after the documented minimum wait (60s), and 502/503/504 on a
+short ladder (2s, then 8s). Jira retries server errors on the same short
+ladder, and a 429 once, honoring a numeric `Retry-After` up to the minute the
+ladder allows. No other 4xx is ever retried, and a failure that outlives its
+ladder raises with the original status and message.
+
 v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
 implementation makes the interface accidentally Jira-shaped, and an OSS project
 that cannot be tried without a Jira instance will not get used. GitHub Issues is
@@ -287,16 +311,30 @@ acceptable because duplicate workers are already the tolerated failure mode.
 
 ## 10. Executors
 
-The executor is how the dispatcher enqueues workers.
+The executor is how the dispatcher enqueues workers, and the only thing that
+knows which of them are still running.
 
 | Executor | Mechanism |
 |---|---|
 | `local` | subprocess. Dev and CLI use. |
 | `cloudrun` | create a Cloud Run job execution against the same image. |
 
+`running(track)` reports the track's workers still in flight, one item id per
+worker, with the stable `sweep` marker standing in for an item-less one — the
+count the dispatch budget subtracts (§5). `local` returns an empty list
+honestly: its workers finish inside `enqueue`. `cloudrun` lists the job's
+executions newest first, keeps the ones with no completion time, and reads
+the item id back from the args overrides `enqueue` set; it stops after 200
+executions, because workers have finite timeouts and the deeper tail is all
+terminal in practice.
+
 v1 ships both. `local` is not optional — it is how anyone tries Tina. A single
 executor would make the interface accidentally Cloud Run-shaped. k8s Jobs, ECS,
 and others come later.
+
+The Cloud Run Admin API sheds load with 503 UNAVAILABLE, so `cloudrun` retries
+`run_job` on a 2s, 8s, 20s ladder — the executor-side counterpart of the source
+adapters' transient retry (§8). Any other failure raises immediately.
 
 ---
 

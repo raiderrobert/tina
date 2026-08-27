@@ -399,6 +399,69 @@ def test_missing_env_is_named() -> None:
         JiraSource(client=httpx.Client())
 
 
+# --- transient retry: server errors and rate limits ---------------------------
+
+
+def test_server_errors_are_retried_on_a_short_ladder() -> None:
+    responses = iter([httpx.Response(500), httpx.Response(503)])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses, httpx.Response(200, json={"issues": [issue()]}))
+
+    waits: list[float] = []
+    items = source(handler, sleep=waits.append).query("project = VUL")
+
+    assert [i.id for i in items] == ["VUL-1"]
+    assert waits == [2.0, 8.0]
+
+
+def test_a_persistent_server_error_raises_after_the_ladder() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="bad gateway")
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="502: bad gateway"):
+        source(handler, sleep=waits.append).query("project = VUL")
+
+    assert waits == [2.0, 8.0]
+
+
+def test_a_rate_limit_waits_what_retry_after_asks() -> None:
+    responses = iter([httpx.Response(429, headers={"Retry-After": "7"})])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses, httpx.Response(200, json={"issues": [issue()]}))
+
+    waits: list[float] = []
+    items = source(handler, sleep=waits.append).query("project = VUL")
+
+    assert [i.id for i in items] == ["VUL-1"]
+    assert waits == [7.0]
+
+
+def test_retry_after_is_capped_so_the_server_cannot_demand_an_hour() -> None:
+    responses = iter([httpx.Response(429, headers={"Retry-After": "3600"})])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses, httpx.Response(200, json={"issues": [issue()]}))
+
+    waits: list[float] = []
+    source(handler, sleep=waits.append).query("project = VUL")
+
+    assert waits == [60.0]
+
+
+def test_a_4xx_other_than_the_rate_limit_is_never_retried() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="forbidden")
+
+    waits: list[float] = []
+    with pytest.raises(SourceError, match="403"):
+        source(handler, sleep=waits.append).query("project = VUL")
+
+    assert waits == []
+
+
 @pytest.mark.parametrize(
     ("document", "expected"),
     [

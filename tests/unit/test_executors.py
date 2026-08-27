@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,8 +12,9 @@ import pytest
 from tina import executors
 from tina.config import CloudRunOptions, Config, ConfigError
 from tina.executors.base import ExecutorError
-from tina.executors.cloudrun import CloudRunExecutor
+from tina.executors.cloudrun import RUNNING_HORIZON, CloudRunExecutor
 from tina.executors.local import LocalExecutor
+from tina.models import SWEEP_ITEM
 
 
 def test_local_executor_spawns_a_worker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,3 +176,146 @@ def test_cloudrun_run_url_is_none_outside_a_job() -> None:
     executor = CloudRunExecutor(CloudRunOptions(project="p", region="r", job="j"))
 
     assert executor.run_url() is None
+
+
+# --- run_job retry: the Admin API sheds load with 503 UNAVAILABLE -------------
+
+
+class Unavailable(Exception):
+    """The shape of google.api_core.exceptions.ServiceUnavailable that matters."""
+
+    code = 503
+
+
+class SheddingJobsClient(FakeJobsClient):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def run_job(self, request: Any) -> None:
+        super().run_job(request)
+        if len(self.requests) <= self.failures:
+            raise Unavailable("503 UNAVAILABLE")
+
+
+def shedding_executor(failures: int) -> tuple[CloudRunExecutor, list[float]]:
+    waits: list[float] = []
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        client=SheddingJobsClient(failures),
+        sleep=waits.append,
+    )
+    return executor, waits
+
+
+def test_run_job_is_retried_while_the_api_sheds_load() -> None:
+    executor, waits = shedding_executor(failures=2)
+
+    executor.enqueue("vul", "VUL-1")
+
+    assert waits == [2.0, 8.0]
+    assert len(executor.client.requests) == 3
+
+
+def test_a_persistently_unavailable_api_raises_after_the_ladder() -> None:
+    executor, waits = shedding_executor(failures=10)
+
+    with pytest.raises(Unavailable):
+        executor.enqueue("vul", "VUL-1")
+
+    assert waits == [2.0, 8.0, 20.0]
+    assert len(executor.client.requests) == 4
+
+
+def test_other_run_job_errors_are_never_retried() -> None:
+    class Denied(Exception):
+        code = 403
+
+    class DenyingJobsClient(FakeJobsClient):
+        def run_job(self, request: Any) -> None:
+            super().run_job(request)
+            raise Denied("permission denied")
+
+    waits: list[float] = []
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        client=DenyingJobsClient(),
+        sleep=waits.append,
+    )
+
+    with pytest.raises(Denied):
+        executor.enqueue("vul", "VUL-1")
+
+    assert waits == []
+
+
+# --- running: the workers still in flight, read back from the executor --------
+
+
+def test_local_running_is_empty_honestly() -> None:
+    """Workers are synchronous subprocesses; none can be in flight during dispatch."""
+    assert LocalExecutor(config_path=Path("tina.toml")).running("vul") == []
+
+
+class FakeExecution:
+    """An execution as `running` reads it: args on the template, a completion time."""
+
+    def __init__(self, args: list[str], done: bool = False) -> None:
+        self.completion_time = "2026-08-27T12:00:00Z" if done else None
+        self.template = SimpleNamespace(containers=[SimpleNamespace(args=args)])
+
+
+class FakeExecutionsClient:
+    def __init__(self, executions: list[FakeExecution]) -> None:
+        self.executions = executions
+        self.parents: list[str] = []
+
+    def list_executions(self, parent: str) -> Iterator[FakeExecution]:
+        self.parents.append(parent)
+        return iter(self.executions)
+
+
+def worker_args(track: str, item: str | None) -> list[str]:
+    args = ["run", "--track", track]
+    if item is not None:
+        args += ["--item", item]
+    return [*args, "--config", "/etc/tina.toml"]
+
+
+def running_executor(executions: list[FakeExecution]) -> CloudRunExecutor:
+    return CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        executions_client=FakeExecutionsClient(executions),
+    )
+
+
+def test_cloudrun_running_reads_item_ids_from_live_executions() -> None:
+    executor = running_executor(
+        [
+            FakeExecution(worker_args("vul", "VUL-1")),
+            FakeExecution(worker_args("vul", "VUL-2"), done=True),
+            FakeExecution(worker_args("bug", "77")),
+            FakeExecution(worker_args("vul", "VUL-3")),
+        ]
+    )
+
+    assert executor.running("vul") == ["VUL-1", "VUL-3"]
+    assert executor.executions_client.parents == ["projects/p/locations/r/jobs/j"]
+
+
+def test_cloudrun_running_names_an_item_less_worker_with_the_sweep_marker() -> None:
+    executor = running_executor([FakeExecution(worker_args("reap", None))])
+
+    assert executor.running("reap") == [SWEEP_ITEM]
+
+
+def test_cloudrun_running_stops_paging_at_the_horizon() -> None:
+    """A live worker deeper than the horizon is not seen — finite timeouts make
+    the deep tail all terminal in practice, so paging further only spends quota."""
+    finished = [
+        FakeExecution(worker_args("vul", "VUL-old"), done=True) for _ in range(RUNNING_HORIZON)
+    ]
+    live = FakeExecution(worker_args("vul", "VUL-deep"))
+    executor = running_executor([*finished, live])
+
+    assert executor.running("vul") == []
