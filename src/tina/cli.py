@@ -319,6 +319,7 @@ def run_item(
     track_name: str,
     item_id: str,
     source: Source | None = None,
+    executor: Executor | None = None,
     dry_run: bool = False,
 ) -> RunRecord | None:
     """Claim one item, run the agent once, verify, record.
@@ -326,6 +327,10 @@ def run_item(
     Returns the record it logged. Every agent outcome is a successful run — the
     outcome is data, not a process failure — so this never signals via an
     exception unless Tina itself broke.
+
+    The executor is built only to ask `run_url()` — the worker's own log link,
+    which the record carries for every outcome. Nothing is enqueued here, and
+    construction is deliberately cheap: no client exists until an enqueue.
 
     `dry_run` returns `None`, because a preview produced no run and there is no
     record to hand back. The prefix up to the claim is executed for real, so
@@ -342,6 +347,9 @@ def run_item(
         _preview_run(config, track, source, item, started)
         return None
 
+    executor = executor or executors.build(config)
+    run_url = executor.run_url()
+
     if not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
         return _record(
@@ -353,6 +361,7 @@ def run_item(
             ),
             exit_code=None,
             started=started,
+            run_url=run_url,
         )
 
     harness_config = config.harness_config()
@@ -362,7 +371,7 @@ def run_item(
         result = harness.run(harness_config, text, workdir)
 
     report = verify.verify(result.report)
-    return _record(track.name, item.id, report, result.exit_code, started)
+    return _record(track.name, item.id, report, result.exit_code, started, run_url)
 
 
 def _preview_run(
@@ -441,6 +450,7 @@ def _record(
     report: OutcomeReport,
     exit_code: int | None,
     started: float,
+    run_url: str | None = None,
 ) -> RunRecord:
     record = RunRecord.build(
         track=track,
@@ -448,6 +458,7 @@ def _record(
         report=report,
         exit_code=exit_code,
         duration_seconds=time.monotonic() - started,
+        run_url=run_url,
     )
     logger.info("run complete", extra=record.model_dump(mode="json"))
     return record

@@ -109,9 +109,13 @@ class NoClaimSource(FakeSource):
 class FakeExecutor:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
+        self.url: str | None = None
 
     def enqueue(self, track: str, item_id: str) -> None:
         self.enqueued.append((track, item_id))
+
+    def run_url(self) -> str | None:
+        return self.url
 
 
 @pytest.fixture
@@ -682,6 +686,53 @@ def test_a_lost_claim_exits_no_action_needed(project: Path, records: io.StringIO
     assert record.effective_status is OutcomeStatus.NO_ACTION_NEEDED
     assert record.exit_code is None, "the harness never ran"
     assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+
+
+# --- run_url: the executor's deep link, on every record ----------------------
+
+
+def test_the_run_record_carries_the_executors_run_url(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Present for every outcome, not only failures."""
+    _, executor = wired
+    executor.url = "https://logs.example/run/1"
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["run_url"] == "https://logs.example/run/1"
+
+
+def test_run_url_is_null_when_the_executor_cannot_tell(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["run_url"] is None
+
+
+def test_a_lost_claim_record_still_carries_the_run_url(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1"), claimable=False))
+    executor = FakeExecutor()
+    executor.url = "https://logs.example/run/2"
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert record["run_url"] == "https://logs.example/run/2"
 
 
 # --- dry run: everything a run does except the parts that change something ---

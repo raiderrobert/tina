@@ -45,3 +45,8 @@ class LocalExecutor:
             "worker finished",
             extra={"track": track, "item": item_id, "exit_code": completed.returncode},
         )
+
+    def run_url(self) -> str | None:
+        """None. There is no log console, and inventing a file path would be
+        worse than admitting it."""
+        return None
