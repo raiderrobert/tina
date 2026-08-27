@@ -36,6 +36,15 @@ track = "remediate"         # skill name under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only — the agent produces it
 # model = "claude-sonnet-x"   # substituted for {model} in the harness command;
 #                             # required exactly when the command references it
+# claim = "assign"            # how the worker claims (ADR-014): "assign" the
+#                             # bot (default), "label" applies claim_label, or
+#                             # "none" — no claim, dedupe is the query's job
+# claim_label = "bot-claimed" # required with claim = "label"; the query must
+#                             # exclude it. Jira:
+#                             #   AND (labels IS EMPTY OR labels != "bot-claimed")
+#                             # GitHub: -label:bot-claimed
+# claim_transition = "In Progress"  # jira only: transition applied after a
+#                             # successful claim, so the queued status stays true
 # enabled = true              # false ships the track without running it
 # on_failure = "leave"        # "annotate": after a failed, needs_human, or
 #                             # unverified run, comment the outcome on the

@@ -39,6 +39,10 @@ class User(BaseModel):
     login: str = ""
 
 
+class Label(BaseModel):
+    name: str = ""
+
+
 class Issue(BaseModel):
     """A GitHub issue, narrowed to what Tina reads.
 
@@ -49,8 +53,10 @@ class Issue(BaseModel):
     number: int
     title: str = ""
     body: str | None = None
+    state: str = ""
     html_url: AnyHttpUrl | None = None
     assignees: list[User] = Field(default_factory=list)
+    labels: list[Label] = Field(default_factory=list)
     #: The payload this was validated from, kept for `WorkItem.raw`.
     raw: dict[str, Any] = Field(default_factory=dict, exclude=True)
 
@@ -62,6 +68,10 @@ class Issue(BaseModel):
     @property
     def logins(self) -> list[str]:
         return [user.login for user in self.assignees]
+
+    @property
+    def label_names(self) -> list[str]:
+        return [label.name for label in self.labels]
 
 
 class SearchResult(BaseModel):
@@ -86,11 +96,15 @@ class GitHubSource:
         bot_login: str | None = None,
         api_base: str | None = None,
         blocked_label: str = "tina-blocked",
+        claim_policy: str = "assign",
+        claim_label: str | None = None,
     ) -> None:
         if not repo:
             raise SourceError('github source requires repo = "owner/name" on the track')
         self.repo = repo
         self.blocked_label = blocked_label
+        self.claim_policy = claim_policy
+        self.claim_label = claim_label
         self.api_base = (api_base or os.environ.get("GITHUB_API_URL") or API_BASE).rstrip("/")
         self._bot_login = bot_login or os.environ.get("GITHUB_BOT_LOGIN")
         if client is None:
@@ -121,7 +135,15 @@ class GitHubSource:
         return self._to_item(self._issue(_number(item_id)))
 
     def claim(self, item: WorkItem) -> bool:
-        """Add the bot as assignee, then confirm it is the only one."""
+        """Take the item under the track's claim policy (ADR-014).
+
+        Assign adds the bot as assignee, then confirms it is the only one. A
+        label claim adds `claim_label`, then confirms it stuck — refusing up
+        front when the label is already present, since a label carries no
+        identity and present always means someone else holds it.
+        """
+        if self.claim_policy == "label":
+            return self._claim_by_label(item)
         number = _number(item.id)
         self._request(
             "POST",
@@ -130,14 +152,34 @@ class GitHubSource:
         )
         return self._issue(number).logins == [self.bot_login]
 
+    def _claim_by_label(self, item: WorkItem) -> bool:
+        number = _number(item.id)
+        if self.claim_label in self._issue(number).label_names:
+            return False
+
+        self._request(
+            "POST",
+            f"/repos/{self.repo}/issues/{number}/labels",
+            json={"labels": [self.claim_label]},
+        )
+
+        return self.claim_label in self._issue(number).label_names
+
     def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
-        """The re-read half of `claim`, with the `POST` that precedes it left off.
+        """The re-read half of `claim`, with the write that precedes it left off.
 
         Assignment is an idempotent add, so the bot already holding the issue
         alone is a claim that would succeed — the opposite of Jira, where any
-        assignee refuses. `bot_login` may cost a `GET /user`; still no write.
+        other assignee refuses. Under label, a present claim label refuses,
+        whoever put it there. `bot_login` may cost a `GET /user`; still no
+        write.
         """
-        logins = self._issue(_number(item.id)).logins
+        issue = self._issue(_number(item.id))
+        if self.claim_policy == "label":
+            if self.claim_label in issue.label_names:
+                return ClaimPrognosis(would_claim=False, holder=f"label:{self.claim_label}")
+            return ClaimPrognosis(would_claim=True, holder="")
+        logins = issue.logins
         if not logins:
             return ClaimPrognosis(would_claim=True, holder="")
         if logins == [self.bot_login]:
@@ -145,11 +187,18 @@ class GitHubSource:
         return ClaimPrognosis(would_claim=False, holder=", ".join(logins))
 
     def claimed(self, q: str) -> list[WorkItem]:
-        """The bot's own issues: the track query with its assignee qualifier inverted.
+        """The bot's own issues: the track query with its exclusion inverted.
 
-        Routed through `query`, so this is the same single `GET /search/issues`
-        a dispatch makes. `bot_login` may cost a `GET /user`; still no write.
+        Which token gets inverted follows the claim policy — `no:assignee`
+        under assign, the negated claim label under label. Routed through
+        `query`, so this is the same single `GET /search/issues` a dispatch
+        makes. Under `claim = "none"` the bot never holds anything, so the
+        answer is an empty list, without a search that would imply otherwise.
         """
+        if self.claim_policy == "none":
+            return []
+        if self.claim_policy == "label":
+            return self.query(claimed_label_search(q, str(self.claim_label)))
         return self.query(claimed_search(q, self.bot_login))
 
     def annotate(self, item: WorkItem, comment: str) -> None:
@@ -227,6 +276,23 @@ def claimed_search(q: str, login: str) -> str:
     return " ".join(
         f"assignee:{login}" if token.lower() == NO_ASSIGNEE else token for token in tokens
     )
+
+
+def claimed_label_search(q: str, label: str) -> str:
+    """Swap the negated claim-label token for its positive, other tokens unmoved.
+
+    The same exact-token scan as `claimed_search`, for the same reason: only
+    token equality tells the qualifier apart from a literal containing its
+    text. The label value may be bare or quoted.
+    """
+    negated = {f"-label:{label.lower()}", f'-label:"{label.lower()}"'}
+    tokens = q.split()
+    if not any(token.lower() in negated for token in tokens):
+        raise SourceError(
+            f"github: the track query has no -label:{label} qualifier to invert: {q!r}",
+            fix=f"Add `-label:{label}` to the track query so dispatch skips claimed issues.",
+        )
+    return " ".join(f"label:{label}" if token.lower() in negated else token for token in tokens)
 
 
 def _number(item_id: str) -> str:

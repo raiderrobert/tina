@@ -350,7 +350,7 @@ def run_item(
     executor = executor or executors.build(config)
     run_url = executor.run_url()
 
-    if not source.claim(item):
+    if track.claim != "none" and not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
         return _record(
             track.name,
@@ -393,16 +393,20 @@ def _preview_run(
     on `message` can never count a preview as a run. The `dry_run` marker is
     added only here, so a normal run carries no such key at all.
     """
-    prognosis = source.claim_prognosis(item)
-    fields: dict[str, Any] = {
-        "dry_run": True,
-        "track": track.name,
-        "item": item.id,
-        "would_claim": prognosis.would_claim,
-        "holder": prognosis.holder,
-    }
-
+    fields: dict[str, Any] = {"dry_run": True, "track": track.name, "item": item.id}
     output.dry_run_header("nothing will be claimed and no agent will run")
+
+    if track.claim == "none":
+        # No claim and no prognosis to preview — the query is the dedupe.
+        output.would('Would skip the claim — claim = "none"; dedupe is the query\'s job')
+        fields |= _preview_prompt(config, track, item)
+        output.dry_run_footer(action=f"run the agent on {item.id}")
+        fields["duration_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("would run", extra=fields)
+        return
+
+    prognosis = source.claim_prognosis(item)
+    fields |= {"would_claim": prognosis.would_claim, "holder": prognosis.holder}
     if prognosis.would_claim:
         held = f"held by {prognosis.holder}" if prognosis.holder else "unassigned"
         output.would(f"Would claim {item.id} — {held}")

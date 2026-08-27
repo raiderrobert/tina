@@ -176,6 +176,62 @@ def test_argv_template_renders_the_model(tmp_path: Path) -> None:
     assert rendered == ["agent", str(tmp_path / "prompt.md"), "--model", "claude-sonnet-x"]
 
 
+def test_claim_defaults_to_assign(tmp_path: Path) -> None:
+    """Today's behavior, unless a track opts out."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").claim == "assign"
+    assert cfg.track("vul").claim_label is None
+    assert cfg.track("vul").claim_transition is None
+
+
+def test_claim_label_and_transition_are_kept(tmp_path: Path) -> None:
+    text = MINIMAL + '\nclaim = "label"\nclaim_label = "bot-claimed"\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").claim == "label"
+    assert cfg.track("vul").claim_label == "bot-claimed"
+
+
+def test_an_unknown_claim_value_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim = "steal"\n'))
+
+
+def test_claim_label_requires_the_label_strategy(tmp_path: Path) -> None:
+    """Set but unused, the label would silently never be applied."""
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_label"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim_label = "bot-claimed"\n'))
+
+
+def test_the_label_strategy_requires_claim_label(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_label"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim = "label"\n'))
+
+
+def test_claim_transition_is_kept_on_a_jira_track(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + '\nclaim_transition = "In Progress"\n'))
+
+    assert cfg.track("vul").claim_transition == "In Progress"
+
+
+def test_claim_transition_on_a_github_track_fails_fast(tmp_path: Path) -> None:
+    """GitHub Issues has no workflow to transition."""
+    text = (
+        MINIMAL.replace('source = "jira"', 'source = "github"\nrepo = "acme/api"')
+        + '\nclaim_transition = "In Progress"\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_transition"):
+        config.load(write(tmp_path, text))
+
+
+def test_claim_transition_under_claim_none_fails_fast(tmp_path: Path) -> None:
+    """No claim ever succeeds, so the transition would silently never fire."""
+    text = MINIMAL + '\nclaim = "none"\nclaim_transition = "In Progress"\n'
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_transition"):
+        config.load(write(tmp_path, text))
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))

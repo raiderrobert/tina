@@ -15,7 +15,11 @@ BASE = "https://acme.atlassian.net"
 BOT = "bot-account-id"
 
 
-def issue(key: str = "VUL-1", assignee: dict[str, Any] | None = None) -> dict[str, Any]:
+def issue(
+    key: str = "VUL-1",
+    assignee: dict[str, Any] | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "key": key,
         "fields": {
@@ -27,6 +31,7 @@ def issue(key: str = "VUL-1", assignee: dict[str, Any] | None = None) -> dict[st
                 ],
             },
             "assignee": assignee,
+            "labels": labels or [],
         },
     }
 
@@ -125,6 +130,210 @@ def test_claim_prognosis_reports_the_holder_without_writing(work_item: WorkItem)
     assert (taken.would_claim, taken.holder) == (False, "someone-else")
     assert (unheld.would_claim, unheld.holder) == (True, "")
     assert calls == ["GET", "GET"], "one read each, and nothing else"
+
+
+# --- claim policies: assign is idempotent, label is a set add (ADR-014) ------
+
+
+def test_a_bot_held_issue_reclaims_successfully(work_item: WorkItem) -> None:
+    """The reclaim deadlock: an item reopened while the bot holds it must not
+    exit no_action_needed forever."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=issue(assignee={"accountId": BOT}))
+
+    assert source(handler).claim(work_item) is True
+    assert calls == ["GET"], "the bot already holds it; nothing is written"
+
+
+def test_claim_prognosis_reports_a_bot_held_issue_as_claimable(work_item: WorkItem) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(assignee={"accountId": BOT}))
+
+    prognosis = source(handler).claim_prognosis(work_item)
+
+    assert (prognosis.would_claim, prognosis.holder) == (True, BOT)
+
+
+def test_claim_transition_is_applied_after_a_successful_assign(work_item: WorkItem) -> None:
+    state: dict[str, Any] = {"assignee": None}
+    calls: list[tuple[str, str]] = []
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/rest/api/3/issue/VUL-1/transitions":
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={"transitions": [{"id": "21", "name": "In Progress"}]},
+                )
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(204)
+        if request.method == "PUT":
+            state["assignee"] = {"accountId": BOT}
+            return httpx.Response(204)
+        return httpx.Response(200, json=issue(assignee=state["assignee"]))
+
+    jira = source(handler, claim_transition="In Progress")
+
+    assert jira.claim(work_item) is True
+    assert calls[-2:] == [
+        ("GET", "/rest/api/3/issue/VUL-1/transitions"),
+        ("POST", "/rest/api/3/issue/VUL-1/transitions"),
+    ], "the transition comes after the claim is confirmed"
+    assert seen["body"] == {"transition": {"id": "21"}}
+
+
+def test_an_unavailable_transition_is_logged_and_the_claim_stands(
+    work_item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The item is assigned and the work proceeds; a stale status is the lesser bug."""
+    state: dict[str, Any] = {"assignee": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/transitions"):
+            return httpx.Response(200, json={"transitions": [{"id": "31", "name": "Done"}]})
+        if request.method == "PUT":
+            state["assignee"] = {"accountId": BOT}
+            return httpx.Response(204)
+        return httpx.Response(200, json=issue(assignee=state["assignee"]))
+
+    with caplog.at_level(logging.WARNING):
+        claimed = source(handler, claim_transition="In Progress").claim(work_item)
+
+    assert claimed is True
+    assert any("transition" in record.message for record in caplog.records)
+
+
+def test_a_failed_transition_is_logged_and_the_claim_stands(
+    work_item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    state: dict[str, Any] = {"assignee": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/transitions"):
+            return httpx.Response(500, text="boom")
+        if request.method == "PUT":
+            state["assignee"] = {"accountId": BOT}
+            return httpx.Response(204)
+        return httpx.Response(200, json=issue(assignee=state["assignee"]))
+
+    with caplog.at_level(logging.WARNING):
+        claimed = source(handler, claim_transition="In Progress").claim(work_item)
+
+    assert claimed is True
+    assert any("transition" in record.message for record in caplog.records)
+
+
+def label_source(handler) -> JiraSource:
+    return source(handler, claim_policy="label", claim_label="bot-claimed")
+
+
+def test_a_label_claim_adds_the_label_then_confirms(work_item: WorkItem) -> None:
+    state: dict[str, list[str]] = {"labels": []}
+    calls: list[tuple[str, str]] = []
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "PUT":
+            seen["body"] = json.loads(request.content)
+            state["labels"] = ["bot-claimed"]
+            return httpx.Response(204)
+        return httpx.Response(200, json=issue(labels=state["labels"]))
+
+    assert label_source(handler).claim(work_item) is True
+    assert [method for method, _ in calls] == ["GET", "PUT", "GET"]
+    assert seen["body"] == {"update": {"labels": [{"add": "bot-claimed"}]}}
+
+
+def test_a_label_claim_refuses_an_already_labeled_issue(work_item: WorkItem) -> None:
+    """The label carries no identity, so present always means someone else holds it."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=issue(labels=["bot-claimed"]))
+
+    assert label_source(handler).claim(work_item) is False
+    assert calls == ["GET"], "a labeled issue is never written to"
+
+
+def test_a_label_claim_fails_when_the_write_did_not_stick(work_item: WorkItem) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(204)
+        return httpx.Response(200, json=issue(labels=[]))
+
+    assert label_source(handler).claim(work_item) is False
+
+
+def test_claim_prognosis_under_a_label_claim(work_item: WorkItem) -> None:
+    def held(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(labels=["bot-claimed", "bug"]))
+
+    def free(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(labels=["bug"]))
+
+    taken = label_source(held).claim_prognosis(work_item)
+    unheld = label_source(free).claim_prognosis(work_item)
+
+    assert (taken.would_claim, taken.holder) == (False, "label:bot-claimed")
+    assert (unheld.would_claim, unheld.holder) == (True, "")
+
+
+def test_claimed_under_a_label_claim_inverts_the_negated_label_clause() -> None:
+    """The documented exclusion shapes, with the rest of the query preserved."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["jql"])
+        return httpx.Response(200, json={"issues": [issue()]})
+
+    cases = [
+        # the shape the config example documents: labels IS EMPTY also matches
+        (
+            'project = VUL AND (labels IS EMPTY OR labels != "bot-claimed")',
+            'project = VUL AND labels = "bot-claimed"',
+        ),
+        # the compound in the other order
+        (
+            '(labels != "bot-claimed" OR labels IS EMPTY) AND project = VUL',
+            'labels = "bot-claimed" AND project = VUL',
+        ),
+        ('project = VUL AND labels != "bot-claimed"', 'project = VUL AND labels = "bot-claimed"'),
+        ("labels != bot-claimed", 'labels = "bot-claimed"'),
+    ]
+    for jql, _ in cases:
+        label_source(handler).claimed(jql)
+
+    assert sent == [expected for _, expected in cases]
+
+
+def test_a_query_with_no_negated_claim_label_is_a_source_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the query is rejected before any request is made")
+
+    for jql in ("project = VUL", 'project = VUL AND labels != "other-label"'):
+        with pytest.raises(SourceError) as caught:
+            label_source(handler).claimed(jql)
+        assert jql in str(caught.value)
+        assert "bot-claimed" in caught.value.fix
+
+
+def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
+    """The bot never holds anything, and asking the tracker would imply it could."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("claim = 'none' has no claims to count")
+
+    assert source(handler, claim_policy="none").claimed("project = VUL") == []
 
 
 def test_http_error_is_a_source_error() -> None:

@@ -157,6 +157,28 @@ class TrackConfig(BaseModel):
     # What a bad run leaves on the item: "leave" retries it next cycle;
     # "annotate" comments the effective status and applies `blocked_label`.
     on_failure: Literal["leave", "annotate"] = "leave"
+    # How the worker claims (ADR-014): "assign" the bot, apply `claim_label`,
+    # or "none" — no claim, dedupe is the query's job.
+    claim: Literal["assign", "none", "label"] = "assign"
+    claim_label: str | None = None
+    # A Jira transition applied after a successful claim, so the queued status
+    # stays truthful and humans can requeue by transition.
+    claim_transition: str | None = None
+
+    @model_validator(mode="after")
+    def _check_claim_policy(self) -> TrackConfig:
+        if self.claim == "label" and not self.claim_label:
+            raise ValueError('claim = "label" requires claim_label')
+        if self.claim != "label" and self.claim_label is not None:
+            raise ValueError('claim_label only applies with claim = "label"')
+        if self.claim_transition is not None:
+            if self.source != "jira":
+                raise ValueError("claim_transition only applies to jira tracks")
+            if self.claim == "none":
+                raise ValueError(
+                    'claim_transition cannot apply under claim = "none" — nothing is ever claimed'
+                )
+        return self
 
     @field_validator("model")
     @classmethod

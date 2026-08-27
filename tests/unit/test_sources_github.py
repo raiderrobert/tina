@@ -20,13 +20,20 @@ def item() -> WorkItem:
     return WorkItem(id="42", source="github", title="crash on startup")
 
 
-def issue(number: int = 42, assignees: list[str] | None = None) -> dict[str, Any]:
+def issue(
+    number: int = 42,
+    assignees: list[str] | None = None,
+    labels: list[str] | None = None,
+    state: str = "open",
+) -> dict[str, Any]:
     return {
         "number": number,
         "title": "crash on startup",
         "body": "stack trace follows",
         "html_url": f"https://github.com/{REPO}/issues/{number}",
         "assignees": [{"login": login} for login in assignees or []],
+        "labels": [{"name": name} for name in labels or []],
+        "state": state,
     }
 
 
@@ -228,6 +235,116 @@ def test_a_query_with_no_no_assignee_qualifier_is_a_source_error() -> None:
             source(handler).claimed(q)
         assert q in str(caught.value)
         assert NO_ASSIGNEE in caught.value.fix
+
+
+# --- claim policies: label claims for App tokens that cannot assign (ADR-014) -
+
+
+def label_source(handler) -> GitHubSource:
+    return source(handler, claim_policy="label", claim_label="bot-claimed")
+
+
+def test_a_label_claim_adds_the_label_then_confirms(item: WorkItem) -> None:
+    state: dict[str, list[str]] = {"labels": []}
+    calls: list[tuple[str, str]] = []
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            seen["body"] = json.loads(request.content)
+            state["labels"] = ["bot-claimed"]
+            return httpx.Response(200, json=[{"name": "bot-claimed"}])
+        return httpx.Response(200, json=issue(labels=state["labels"]))
+
+    assert label_source(handler).claim(item) is True
+    assert calls == [
+        ("GET", f"/repos/{REPO}/issues/42"),
+        ("POST", f"/repos/{REPO}/issues/42/labels"),
+        ("GET", f"/repos/{REPO}/issues/42"),
+    ]
+    assert seen["body"] == {"labels": ["bot-claimed"]}
+
+
+def test_a_label_claim_refuses_an_already_labeled_issue(item: WorkItem) -> None:
+    """The label carries no identity, so present always means someone else holds it."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=issue(labels=["bot-claimed"]))
+
+    assert label_source(handler).claim(item) is False
+    assert calls == ["GET"], "a labeled issue is never written to"
+
+
+def test_a_label_claim_fails_when_the_write_did_not_stick(item: WorkItem) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=issue(labels=[]))
+
+    assert label_source(handler).claim(item) is False
+
+
+def test_claim_prognosis_under_a_label_claim(item: WorkItem) -> None:
+    def held(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(labels=["bot-claimed", "bug"]))
+
+    def free(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "claim_prognosis must never write"
+        return httpx.Response(200, json=issue(labels=["bug"]))
+
+    taken = label_source(held).claim_prognosis(item)
+    unheld = label_source(free).claim_prognosis(item)
+
+    assert (taken.would_claim, taken.holder) == (False, "label:bot-claimed")
+    assert (unheld.would_claim, unheld.holder) == (True, "")
+
+
+def test_claimed_under_a_label_claim_inverts_the_negated_label_token() -> None:
+    """`-label:x` becomes `label:x`; every other qualifier stays put."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.params["q"])
+        return httpx.Response(200, json={"items": [issue()]})
+
+    cases = [
+        (
+            "repo:acme/api is:issue is:open -label:bot-claimed label:bug",
+            "repo:acme/api is:issue is:open label:bot-claimed label:bug",
+        ),
+        ('repo:acme/api -label:"bot-claimed"', "repo:acme/api label:bot-claimed"),
+        ("-LABEL:BOT-CLAIMED", "label:bot-claimed"),
+    ]
+    for q, _ in cases:
+        label_source(handler).claimed(q)
+
+    assert sent == [expected for _, expected in cases]
+
+
+def test_a_query_with_no_negated_claim_label_is_a_source_error() -> None:
+    """A different label's negation is not the claim label's."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("the query is rejected before any request is made")
+
+    for q in ("repo:acme/api is:open", "repo:acme/api -label:other-label"):
+        with pytest.raises(SourceError) as caught:
+            label_source(handler).claimed(q)
+        assert q in str(caught.value)
+        assert "-label:bot-claimed" in caught.value.fix
+
+
+def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
+    """The bot never holds anything, and asking the tracker would imply it could."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("claim = 'none' has no claims to count")
+
+    assert source(handler, claim_policy="none").claimed("repo:acme/api is:open") == []
 
 
 # --- lifecycle write-back: annotate and block (ADR-013) ----------------------

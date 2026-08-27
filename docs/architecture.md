@@ -227,6 +227,15 @@ state file, restartable containers, multiple invokers safe by default.
 user or applies a label, and the configured query excludes claimed items — which
 is what `unassigned = TRUE` is already doing in the work implementation.
 
+The claim strategy is per track ([ADR-014](adr/014-claim-policy-per-track.md)):
+`claim = "assign"` (default) assigns the bot, idempotently — an item the bot
+already holds re-claims rather than deadlocking. `claim = "label"` applies
+`claim_label` instead, for deployments whose tokens cannot assign; the query
+must exclude the label, and `claimed()`/`status` invert that negated label
+token rather than the assignee clause. `claim = "none"` skips claiming
+entirely — dedupe is the query's job. On Jira, `claim_transition` names a
+status transition applied after a successful claim.
+
 This is a choice between failure modes:
 
 | | Failure mode |

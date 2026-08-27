@@ -727,6 +727,52 @@ def test_a_dry_run_previews_the_model_in_the_command(
     assert last_record(result.stdout)["command"][-1] == "claude-sonnet-x"
 
 
+# --- claim = "none": no claim, no prognosis, dedupe is the query's job -------
+
+
+class NoPrognosisSource(NoClaimSource):
+    """A tracker that fails the test if claim or prognosis is asked for."""
+
+    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
+        raise AssertionError('claim = "none" must never ask for a prognosis')
+
+
+@pytest.fixture
+def unclaiming(project: Path) -> Path:
+    """The project config with the claim switched off."""
+    project.write_text(project.read_text() + '\nclaim = "none"\n')
+    return project
+
+
+def test_claim_none_runs_the_agent_without_claiming(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asserted by the absence of the call: the source fails the test if asked."""
+    wire(monkeypatch, NoPrognosisSource(items("VUL-1")))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(unclaiming)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["message"] == "run complete"
+
+
+def test_a_dry_run_under_claim_none_says_dedupe_is_the_querys_job(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No prognosis is asked for, and the preview says why there is none."""
+    wire(monkeypatch, NoPrognosisSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(unclaiming)])
+    line = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert "dedupe is the query's job" in plain(result.stderr)
+    assert set(line) & {"would_claim", "holder"} == set(), "no prognosis, no verdict fields"
+    assert "command" in line, "the rest of the preview still happens"
+
+
 # --- on_failure: a bad run leaves a trace and stops matching -----------------
 
 RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]
