@@ -61,14 +61,20 @@ If this file is missing when you exit, the run is recorded as failed.
 """
 
 
-def build(track_dir: Path, item: WorkItem, outcome_path: Path) -> str:
-    """Assemble the full prompt handed to the harness."""
+def build(track_dir: Path, item: WorkItem | None, outcome_path: Path) -> str:
+    """Assemble the full prompt handed to the harness.
+
+    `item` is None for a sweep run: the skill discovers its own work, so the
+    work-item block is omitted entirely. The outcome contract is unchanged.
+    """
     skill = strip_frontmatter(read_skill(track_dir))
-    return "\n".join(
-        [
-            SKILL_ROOT_ANCHOR.format(skill_root=track_dir.resolve()),
-            skill.rstrip(),
-            "",
+    parts = [
+        SKILL_ROOT_ANCHOR.format(skill_root=track_dir.resolve()),
+        skill.rstrip(),
+        "",
+    ]
+    if item is not None:
+        parts += [
             "## Work item",
             "",
             "This is the single work item for this run, as JSON:",
@@ -77,9 +83,9 @@ def build(track_dir: Path, item: WorkItem, outcome_path: Path) -> str:
             item.model_dump_json(indent=2),
             "```",
             "",
-            OUTCOME_INSTRUCTIONS.format(outcome_path=outcome_path),
         ]
-    )
+    parts.append(OUTCOME_INSTRUCTIONS.format(outcome_path=outcome_path))
+    return "\n".join(parts)
 
 
 def strip_frontmatter(skill: str) -> str:

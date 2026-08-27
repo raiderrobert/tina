@@ -79,6 +79,73 @@ def test_build_rejects_an_unknown_executor(tmp_path: Path) -> None:
         executors.build(config)
 
 
+# --- item-less enqueue: how a sweep worker starts -----------------------------
+
+
+def test_local_executor_spawns_an_item_less_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No --item pair at all — `tina run` decides what an absent item means."""
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    LocalExecutor(config_path=Path("/etc/tina.toml")).enqueue("reap")
+
+    assert calls == [
+        [
+            sys.executable,
+            "-m",
+            "tina",
+            "run",
+            "--track",
+            "reap",
+            "--config",
+            "/etc/tina.toml",
+        ]
+    ]
+
+
+class FakeJobsClient:
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    def run_job(self, request: Any) -> None:
+        self.requests.append(request)
+
+
+def test_cloudrun_executor_omits_the_item_from_the_args() -> None:
+    client = FakeJobsClient()
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        config_path="/etc/tina.toml",
+        client=client,
+    )
+
+    executor.enqueue("reap")
+
+    (request,) = client.requests
+    args = list(request.overrides.container_overrides[0].args)
+    assert args == ["run", "--track", "reap", "--config", "/etc/tina.toml"]
+
+
+def test_cloudrun_executor_passes_the_item_when_given() -> None:
+    client = FakeJobsClient()
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        config_path="/etc/tina.toml",
+        client=client,
+    )
+
+    executor.enqueue("vul", "VUL-1")
+
+    (request,) = client.requests
+    args = list(request.overrides.container_overrides[0].args)
+    assert args == ["run", "--track", "vul", "--item", "VUL-1", "--config", "/etc/tina.toml"]
+
+
 # --- run_url: a deep link to the worker's own logs ---------------------------
 
 

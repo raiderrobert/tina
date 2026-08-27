@@ -14,6 +14,8 @@ __all__ = ["Source", "JiraSource", "GitHubSource", "build"]
 
 def build(track: TrackConfig, client: httpx.Client | None = None) -> Source:
     """Instantiate the source adapter a track declares."""
+    if track.source is None:
+        raise ValueError(f'track {track.name!r} has no source (mode = "sweep")')
     if track.source == "jira":
         return JiraSource(
             client=client,

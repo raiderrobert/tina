@@ -11,8 +11,12 @@ from tina.errors import TinaError
 class Executor(Protocol):
     """How the dispatcher enqueues workers. One item = one worker."""
 
-    def enqueue(self, track: str, item_id: str) -> None:
-        """Start a `tina run --track <track> --item <item_id>` worker."""
+    def enqueue(self, track: str, item_id: str | None = None) -> None:
+        """Start a `tina run --track <track>` worker.
+
+        `item_id` becomes `--item <item_id>`; None passes no item at all,
+        which is how a sweep worker starts.
+        """
         ...
 
     def run_url(self) -> str | None:

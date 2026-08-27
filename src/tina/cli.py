@@ -28,6 +28,10 @@ from tina.sources.base import Source
 
 DEFAULT_CONFIG = Path("tina.toml")
 
+#: What a sweep run records where the item id would be. Stable, so anything
+#: grouping run records by item sees one series per sweep track.
+SWEEP_ITEM = "sweep"
+
 logger = log.get_logger("tina")
 
 app = typer.Typer(
@@ -87,7 +91,10 @@ def dispatch(
 @app.command()
 def run(
     track: TrackOption,
-    item: Annotated[str, typer.Option("--item", help="Tracker identifier of the work item.")],
+    item: Annotated[
+        str | None,
+        typer.Option("--item", help="Tracker identifier of the work item. Sweep tracks take none."),
+    ] = None,
     config: ConfigOption = DEFAULT_CONFIG,
     dry_run: Annotated[
         bool,
@@ -164,6 +171,10 @@ def dispatch_track(
         _paused_dispatch(track, policy, dry_run)
         return
 
+    if track.mode == "sweep":
+        _dispatch_sweep(config, track, policy, executor, dry_run)
+        return
+
     effective, limit_origin = _effective_limit(limit, policy)
     source = source or sources.build(track)
     if dry_run:
@@ -230,6 +241,66 @@ def _paused_dispatch(track: TrackConfig, policy: control.LoadedPolicy, dry_run: 
     output.dry_run_header()
     output.would(f"Would exit paused — control policy from {policy.origin}; no query would run")
     output.dry_run_footer(action="exit paused without querying")
+
+
+def _dispatch_sweep(
+    config: Config,
+    track: TrackConfig,
+    policy: control.LoadedPolicy,
+    executor: Executor | None,
+    dry_run: bool,
+) -> None:
+    """Enqueue exactly one worker with no item. No source, no query.
+
+    `--limit` does not apply: a sweep has no queue to take more of, and the
+    skill discovers its own work. The control file still gates it — a sweep
+    launch counts as one worker, so `max_concurrency = 0` launches nothing.
+    """
+    if policy.max_concurrency is not None and policy.max_concurrency < 1:
+        workers, limit_origin = 0, "max_concurrency"
+    else:
+        workers, limit_origin = 1, "sweep"
+    fields = {
+        "track": track.name,
+        "mode": "sweep",
+        "workers": workers,
+        "limit_origin": limit_origin,
+    }
+    if dry_run:
+        logger.info("dispatching", extra=fields | {"dry_run": True})
+        _preview_sweep(config, track, workers, policy)
+        return
+
+    executor = executor or executors.build(config)
+    logger.info("dispatching", extra=fields)
+    if workers:
+        executor.enqueue(track.name)
+        logger.info("enqueued", extra=_sweep_fields(track.name, config.executor))
+
+
+def _preview_sweep(
+    config: Config, track: TrackConfig, workers: int, policy: control.LoadedPolicy
+) -> None:
+    """The dry-run half of a sweep dispatch: same verdict, no executor."""
+    output.dry_run_header()
+    if policy.origin != "defaults":
+        throttle = "unset" if policy.max_concurrency is None else policy.max_concurrency
+        output.would(
+            f"Would apply control policy from {policy.origin}: max_concurrency {throttle},"
+            f" sweep workers {workers}"
+        )
+    if workers:
+        output.would(f"Would enqueue one sweep worker via {config.executor} — no query would run")
+        logger.info(
+            "would enqueue",
+            extra=_sweep_fields(track.name, config.executor) | {"dry_run": True},
+        )
+    output.dry_run_footer()
+
+
+def _sweep_fields(track: str, executor: str) -> dict[str, str]:
+    """The per-item stdout schema, with the stable sweep marker as the item."""
+    return {"track": track, "item": SWEEP_ITEM, "url": "", "executor": executor}
 
 
 def _item_fields(track: str, item: WorkItem, executor: str) -> dict[str, str]:
@@ -302,6 +373,11 @@ def status_track(config: Config, track_name: str, source: Source | None = None) 
     the guarantee, since there is no call here that could do either.
     """
     track = config.track(track_name)
+    if track.mode == "sweep":
+        raise ConfigError(
+            f"{config.path}: track {track.name!r} is a sweep track — there is no queue to count",
+            fix="Status reads the source query; sweep tracks have none.",
+        )
     source = source or sources.build(track)
 
     unclaimed = len(source.query(track.query))
@@ -317,12 +393,15 @@ def status_track(config: Config, track_name: str, source: Source | None = None) 
 def run_item(
     config: Config,
     track_name: str,
-    item_id: str,
+    item_id: str | None,
     source: Source | None = None,
     executor: Executor | None = None,
     dry_run: bool = False,
 ) -> RunRecord | None:
     """Claim one item, run the agent once, verify, record.
+
+    `item_id` is required exactly when the track has a queue: a sweep track
+    takes none and refuses one, since there is no source to fetch it from.
 
     Returns the record it logged. Every agent outcome is a successful run — the
     outcome is data, not a process failure — so this never signals via an
@@ -340,6 +419,20 @@ def run_item(
     started = time.monotonic()
     track = config.track(track_name)
     _require_enabled(config, track)
+
+    if track.mode == "sweep":
+        if item_id is not None:
+            raise ConfigError(
+                f"{config.path}: track {track.name!r} is a sweep track and takes no --item",
+                fix="Drop --item; a sweep run has no work item.",
+            )
+        return _run_sweep(config, track, executor, dry_run, started)
+    if item_id is None:
+        raise ConfigError(
+            f"{config.path}: track {track.name!r} runs from a queue and needs --item",
+            fix='Pass --item <id>, or set mode = "sweep" on the track.',
+        )
+
     source = source or sources.build(track)
 
     item = source.get(item_id)
@@ -386,11 +479,48 @@ def run_item(
         workdir = Path(tmp)
         text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
         result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
+        harness.capture(result.session_dir, config.artifacts_path(), item.id)
 
     report = verify.verify(result.report)
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)
     _write_back(track, source, item, record)
     return record
+
+
+def _run_sweep(
+    config: Config,
+    track: TrackConfig,
+    executor: Executor | None,
+    dry_run: bool,
+    started: float,
+) -> RunRecord | None:
+    """Run the agent once with no work item. No source, no claim, no re-check.
+
+    The prompt keeps the skill and the outcome instructions and omits the
+    work-item block; verification and the record are the same as any run, with
+    the stable sweep marker where the item id would be.
+    """
+    if dry_run:
+        fields: dict[str, Any] = {"dry_run": True, "track": track.name, "item": SWEEP_ITEM}
+        output.dry_run_header("no agent will run")
+        fields |= _preview_prompt(config, track, None)
+        output.dry_run_footer(action="run the sweep agent")
+        fields["duration_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("would run", extra=fields)
+        return None
+
+    executor = executor or executors.build(config)
+    run_url = executor.run_url()
+
+    harness_config = config.harness_config()
+    with tempfile.TemporaryDirectory(prefix="tina-") as tmp:
+        workdir = Path(tmp)
+        text = prompt.build(config.track_dir(track), None, harness.outcome_path(workdir))
+        result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
+        harness.capture(result.session_dir, config.artifacts_path(), SWEEP_ITEM)
+
+    report = verify.verify(result.report)
+    return _record(track.name, SWEEP_ITEM, report, result.exit_code, started, run_url)
 
 
 def _preview_run(
@@ -452,7 +582,7 @@ def _preview_run(
     logger.info("would run", extra=fields)
 
 
-def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[str, Any]:
+def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem | None) -> dict[str, Any]:
     """Assemble the genuine prompt and render the genuine command.
 
     The workdir is a real one that outlives the process — a printed command
@@ -465,7 +595,9 @@ def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[
     workdir = Path(tempfile.mkdtemp(prefix="tina-"))
     text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
     prompt_file = harness.write_prompt(text, workdir)
-    command = harness_config.command.render(prompt_file, workdir, model=track.model)
+    command = harness_config.command.render(
+        prompt_file, workdir, model=track.model, session_dir=harness.session_path(workdir)
+    )
 
     output.would(f"Prompt assembled: {prompt_file} ({len(text)} chars)")
     output.would(f"Would run: {shlex.join(command)}")

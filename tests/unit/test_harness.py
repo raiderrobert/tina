@@ -162,6 +162,94 @@ def test_no_track_env_inherits_the_environment_untouched(tmp_path: Path) -> None
     assert result.report.details == "True"
 
 
+def test_a_session_dir_is_created_and_substituted(tmp_path: Path) -> None:
+    """The harness writes whatever it writes there; tina only provides the path."""
+    fake = script(
+        tmp_path,
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[3], 'transcript.jsonl').write_text('turn one\\n')\n"
+        "pathlib.Path(sys.argv[2], 'outcome.json').write_text('{\"outcome\": \"resolved\"}')\n",
+    )
+    workdir = tmp_path / "run"
+
+    result = harness.run(
+        config(sys.executable, str(fake), "{prompt_file}", "{outcome_dir}", "{session_dir}"),
+        "prompt",
+        workdir,
+    )
+
+    assert result.session_dir is not None
+    assert result.session_dir.is_dir(), "fresh and ready before the harness starts"
+    assert (result.session_dir / "transcript.jsonl").read_text() == "turn one\n"
+
+
+def test_no_session_dir_reference_creates_no_directory(tmp_path: Path) -> None:
+    fake = script(
+        tmp_path,
+        "import pathlib, sys\n"
+        "pathlib.Path(sys.argv[2], 'outcome.json').write_text('{\"outcome\": \"resolved\"}')\n",
+    )
+    workdir = tmp_path / "run"
+
+    result = harness.run(
+        config(sys.executable, str(fake), "{prompt_file}", "{outcome_dir}"), "prompt", workdir
+    )
+
+    assert result.session_dir is None
+    assert not (workdir / harness.SESSION_DIR).exists()
+
+
+def test_capture_copies_the_session_contents_under_the_item(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    (session / "sub").mkdir(parents=True)
+    (session / "transcript.jsonl").write_text("turn one\n")
+    (session / "sub" / "cost.json").write_text("{}")
+    artifacts = tmp_path / "artifacts"
+
+    harness.capture(session, artifacts, "VUL-1")
+
+    assert (artifacts / "VUL-1" / "transcript.jsonl").read_text() == "turn one\n"
+    assert (artifacts / "VUL-1" / "sub" / "cost.json").read_text() == "{}"
+
+
+def test_capture_without_an_artifacts_dir_copies_nothing_and_warns_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "transcript.jsonl").write_text("turn one\n")
+
+    harness.capture(session, None, "VUL-1")
+
+    assert caplog.records == []
+
+
+def test_capture_without_a_session_dir_copies_nothing_and_warns_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness.capture(None, tmp_path / "artifacts", "VUL-1")
+
+    assert caplog.records == []
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_a_capture_failure_is_logged_and_never_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Best-effort: the evidence is lost, the run is not."""
+    session = tmp_path / "session"
+    session.mkdir()
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("bucket mount went away")
+
+    monkeypatch.setattr(harness.shutil, "copytree", boom)
+
+    harness.capture(session, tmp_path / "artifacts", "VUL-1")
+
+    assert any("artifact capture failed" in record.message for record in caplog.records)
+
+
 def test_a_bogus_artifact_url_is_a_broken_report(tmp_path: Path) -> None:
     """`"url": "TBD"` is not an artifact that 404s — it is an invalid report."""
     path = tmp_path / "outcome.json"

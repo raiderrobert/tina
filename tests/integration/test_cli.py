@@ -115,10 +115,10 @@ class NoClaimSource(FakeSource):
 
 class FakeExecutor:
     def __init__(self) -> None:
-        self.enqueued: list[tuple[str, str]] = []
+        self.enqueued: list[tuple[str, str | None]] = []
         self.url: str | None = None
 
-    def enqueue(self, track: str, item_id: str) -> None:
+    def enqueue(self, track: str, item_id: str | None = None) -> None:
         self.enqueued.append((track, item_id))
 
     def run_url(self) -> str | None:
@@ -337,10 +337,14 @@ def test_run_exits_zero_when_the_agent_reports_failed(
     assert last_record(result.output)["effective_status"] == OutcomeStatus.FAILED
 
 
-def test_missing_required_option_is_a_usage_error(project: Path) -> None:
+def test_a_queue_run_without_an_item_is_refused(project: Path) -> None:
+    """--item is required exactly when the track has a queue to take it from."""
     result = runner.invoke(cli.app, ["run", "--track", "vul", "--config", str(project)])
 
-    assert result.exit_code == 2, "typer reports a usage error, not a tina error"
+    assert result.exit_code == 1
+    message = last_record(result.stdout)["message"]
+    assert "'vul'" in message
+    assert "--item" in message
 
 
 def test_reports_a_bad_config() -> None:
@@ -1408,6 +1412,322 @@ def test_run_never_reads_the_control_plane(
 
     assert result.exception is None
     assert result.exit_code == 0
+
+
+# --- sweep tracks: one worker, no item, no claim ------------------------------
+
+SWEEP_CONFIG = """
+harness = "fake"
+tracks_dir = "tracks"
+
+[harnesses.fake]
+command = ["{python}", "{script}", "{{prompt_file}}", "{{outcome_dir}}"]
+
+[reap]
+mode = "sweep"
+"""
+
+# A fake sweep agent: it fails the run if a work item block reaches the prompt.
+SWEEP_AGENT = """\
+import pathlib, sys
+prompt = pathlib.Path(sys.argv[1]).read_text()
+outcome = pathlib.Path(__file__).with_name("outcome_to_write.json").read_text()
+assert "Reap stuck claims" in prompt, "track skill missing from prompt"
+assert "## Work item" not in prompt, "a sweep prompt has no work item block"
+pathlib.Path(sys.argv[2], "outcome.json").write_text(outcome)
+"""
+
+
+@pytest.fixture
+def sweep_project(tmp_path: Path) -> Path:
+    """A sweep track: a config, a skill, and an agent that rejects a work item."""
+    script = tmp_path / "agent.py"
+    script.write_text(SWEEP_AGENT)
+    (script.parent / "outcome_to_write.json").write_text(
+        json.dumps({"outcome": "resolved", "details": "nothing stuck"})
+    )
+
+    track = tmp_path / "tracks" / "reap"
+    track.mkdir(parents=True)
+    (track / "SKILL.md").write_text("# Reap stuck claims\n")
+
+    path = tmp_path / "tina.toml"
+    path.write_text(SWEEP_CONFIG.format(python=sys.executable, script=script))
+    return path
+
+
+@pytest.fixture
+def no_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sweep must never build a source; the factory fails the test if asked."""
+
+    def fail(track: Any, client: Any = None) -> Any:
+        raise AssertionError("a sweep track must never build a source")
+
+    monkeypatch.setattr(sources, "build", fail)
+
+
+def test_a_sweep_dispatch_enqueues_one_worker_with_no_item(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No query ran — asserted by the absence of the source itself."""
+    executor = FakeExecutor()
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "reap", "--config", str(sweep_project)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert executor.enqueued == [("reap", None)]
+
+
+def test_the_limit_does_not_apply_to_a_sweep(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executor = FakeExecutor()
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "reap", "--limit", "5", "--config", str(sweep_project)]
+    )
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("reap", None)], "a sweep is always exactly one worker"
+
+
+def test_a_paused_sweep_dispatch_enqueues_nothing(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paused wins, before the sweep branch is even reached."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+    executor = FakeExecutor()
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "reap", "--config", str(sweep_project)])
+
+    assert result.exit_code == 0
+    assert executor.enqueued == []
+    assert any(line["message"] == "dispatch paused" for line in json_lines(result.stdout))
+
+
+def test_max_concurrency_zero_holds_the_sweep(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep launch counts as one worker, so a zero throttle launches none."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 0")
+    executor = FakeExecutor()
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "reap", "--config", str(sweep_project)])
+    record = next(line for line in json_lines(result.stdout) if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert executor.enqueued == []
+    assert record["workers"] == 0
+    assert record["limit_origin"] == "max_concurrency"
+
+
+def test_a_sweep_dispatch_dry_run_builds_no_executor(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(cfg: config.Config) -> executors.Executor:
+        raise AssertionError("executors.build must not be called for a dry run")
+
+    monkeypatch.setattr(executors, "build", fail)
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "reap", "--config", str(sweep_project), "--dry-run"]
+    )
+    would = next(line for line in json_lines(result.stdout) if line["message"] == "would enqueue")
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert would["item"] == "sweep"
+    assert would["dry_run"] is True
+    assert "Would enqueue one sweep worker via local" in plain(result.stderr)
+
+
+def test_a_sweep_run_needs_no_item_and_never_claims(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fake agent itself asserts no work item reached the prompt."""
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, ["run", "--track", "reap", "--config", str(sweep_project)])
+    record = last_record(result.stdout)
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert record["message"] == "run complete"
+    assert record["item"] == "sweep", "the record carries the stable marker"
+    assert record["exit_code"] == 0, "the agent's asserts all passed"
+    assert record["effective_status"] == OutcomeStatus.RESOLVED
+
+
+def test_an_item_on_a_sweep_track_is_refused(sweep_project: Path, no_source: None) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "--track", "reap", "--item", "VUL-1", "--config", str(sweep_project)]
+    )
+
+    assert result.exit_code == 1
+    message = last_record(result.stdout)["message"]
+    assert "'reap'" in message
+    assert "--item" in message
+
+
+def test_sweep_verification_is_unchanged(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that lies about its artifacts is flipped to needs_human like any run."""
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+    outcome_written(
+        sweep_project,
+        {
+            "outcome": "resolved",
+            "details": "filed an issue",
+            "artifacts": [{"kind": "github:issue", "url": MISSING_ARTIFACT}],
+        },
+    )
+
+    result = runner.invoke(cli.app, ["run", "--track", "reap", "--config", str(sweep_project)])
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert record["report"]["verified"] is False
+    assert record["effective_status"] == OutcomeStatus.NEEDS_HUMAN
+
+
+def test_a_sweep_dry_run_previews_the_command(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No claim to preview, so the line-up is prompt, command, verification."""
+
+    def fail(*args: Any, **kwargs: Any) -> harness.HarnessResult:
+        raise AssertionError("harness.run must not be called for a dry run")
+
+    monkeypatch.setattr(harness, "run", fail)
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "reap", "--config", str(sweep_project), "--dry-run"]
+    )
+    line = last_record(result.stdout)
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert line["message"] == "would run"
+    assert line["item"] == "sweep"
+    assert "command" in line
+    assert set(line) & {"matches", "would_claim", "holder"} == set(), "nothing to claim or re-check"
+    assert "Would run:" in plain(result.stderr)
+
+
+def test_status_refuses_a_sweep_track(sweep_project: Path, no_source: None) -> None:
+    """There is no queue to count; a made-up zero would only mislead."""
+    result = runner.invoke(cli.app, ["status", "--track", "reap", "--config", str(sweep_project)])
+
+    assert result.exit_code == 1
+    message = last_record(result.stdout)["message"]
+    assert "'reap'" in message
+    assert "sweep" in message
+
+
+# --- artifact capture: whatever landed in {session_dir} survives the run -----
+
+
+def with_session_capture(config_path: Path, artifacts: bool = True) -> Path:
+    """Point the fake command at {session_dir}, and set artifacts_dir when asked.
+
+    The agent writes a transcript there, so the assertion is on a file the
+    harness actually produced, not on the directory existing.
+    """
+    text = config_path.read_text()
+    text = text.replace('"{outcome_dir}"]', '"{outcome_dir}", "{session_dir}"]')
+    if artifacts:
+        text = text.replace(
+            'tracks_dir = "tracks"', 'tracks_dir = "tracks"\nartifacts_dir = "artifacts"'
+        )
+    config_path.write_text(text)
+    script = config_path.parent / "agent.py"
+    script.write_text(
+        script.read_text()
+        + "pathlib.Path(sys.argv[3], 'transcript.jsonl').write_text('turn one\\n')\n"
+    )
+    return config_path
+
+
+def test_session_files_arrive_under_the_item(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    with_session_capture(project)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["message"] == "run complete"
+    copied = project.parent / "artifacts" / "VUL-1" / "transcript.jsonl"
+    assert copied.read_text() == "turn one\n"
+
+
+def test_a_failed_run_is_still_captured(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Any outcome: a failing track is exactly when the transcript matters."""
+    with_session_capture(project)
+    outcome_written(project, {"outcome": "failed", "details": "plausible nonsense"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert (project.parent / "artifacts" / "VUL-1" / "transcript.jsonl").exists()
+
+
+def test_a_capture_failure_leaves_the_run_record_unchanged(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort: logged, never raised, and the record is what it would have been."""
+    with_session_capture(project)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("bucket mount went away")
+
+    monkeypatch.setattr(harness.shutil, "copytree", boom)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+    record = last_record(result.stdout)
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert record["message"] == "run complete"
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert any(line["message"] == "artifact capture failed" for line in json_lines(result.stdout))
+
+
+def test_unset_artifacts_dir_copies_nothing_and_warns_nothing(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """{session_dir} still substitutes, so one harness table works everywhere."""
+    with_session_capture(project, artifacts=False)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent wrote into {session_dir}"
+    assert not (project.parent / "artifacts").exists()
+    assert all("capture" not in line["message"] for line in json_lines(result.stdout)), (
+        "nothing to do is not a warning"
+    )
+
+
+def test_a_sweep_run_captures_under_the_sweep_marker(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_session_capture(sweep_project)
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, ["run", "--track", "reap", "--config", str(sweep_project)])
+
+    assert result.exit_code == 0
+    copied = sweep_project.parent / "artifacts" / "sweep" / "transcript.jsonl"
+    assert copied.read_text() == "turn one\n"
 
 
 # --- status: two counts, no writes ------------------------------------------

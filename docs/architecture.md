@@ -76,6 +76,23 @@ One track can produce different results per run: the vulnerability track
 ends in a PR link or a discovery comment depending on what it finds. Results are
 not 1:1 with tracks.
 
+### Sweep tracks
+
+Not every useful track has a queue: scan recent job executions and file an
+issue per failure signature, sweep for stuck claims, produce a periodic
+report. `mode = "sweep"` declares such a track
+([ADR-015](adr/015-sweep-tracks-run-without-a-work-item.md)). Its `dispatch`
+enqueues exactly one worker with no item and runs no query; `--limit` does not
+apply, though the control file still gates it — paused wins, and a sweep
+launch counts as one worker against `max_concurrency`. Its `run` takes no
+`--item`, skips the source, the claim, and the eligibility re-check, and
+omits the work-item block from the prompt. The outcome contract, verification,
+and the run record are unchanged; the record carries a stable `sweep` marker
+where the item id would be. Discovering the work, deduplicating it against
+what was already filed, and delivering it is the skill's job. Queue keys
+(`source`, `query`, claim and failure policy) are invalid on a sweep entry
+and rejected at config load.
+
 ---
 
 ## 5. Dispatch and worker
@@ -314,8 +331,8 @@ Singular `harness` selects; plural `[harnesses.<name>]` defines. TOML will not l
 one key be both a string and a table, so the two cannot share a name. `executor`
 and `[executors.<name>]` work the same way.
 
-The command may reference three placeholders: `{prompt_file}`, `{outcome_dir}`,
-and `{model}`. A command referencing `{model}` requires every track to set
+The command may reference four placeholders: `{prompt_file}`, `{outcome_dir}`,
+`{model}`, and `{session_dir}`. A command referencing `{model}` requires every track to set
 `model` — small fast models for triage tracks, frontier ones for code-change
 tracks — and a track setting `model` under a command that never references it
 is equally a config-load error, because the value would silently not reach the
@@ -327,6 +344,19 @@ agent runs with its working directory set to the run's temp workdir, and
 without the anchor every relative reference in the skill resolves nowhere.
 `SKILL.md`'s leading YAML frontmatter is stripped before inlining — it is
 adapter metadata, not prompt content.
+
+`{session_dir}` is where the harness leaves its session — the transcript, tool
+calls, and token costs the final message never shows. A command referencing it
+gets a fresh directory per run; one that never references it gets no directory
+created. The worker's temp directory deletes the session on the way out, so
+the optional top-level `artifacts_dir` key names where to keep it: after the
+harness exits, whatever landed in the session directory is copied to
+`<artifacts_dir>/<item>/` (`sweep` for a sweep run), for any outcome. The copy
+is best-effort — a capture failure is logged and never fails the run — and the
+destination is just a path, so a bucket mount works with no cloud code in
+Tina, the same reasoning as the control file. `artifacts_dir` unset skips the
+copy silently; `{session_dir}` still substitutes, so one harness table works
+in both environments.
 
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
@@ -524,8 +554,9 @@ a directory. Versioning, pinning, and three-way-merge upgrades are napoln's job.
 | Tracks | none shipped; installed via napoln |
 
 Deferred: REST/webhook entrypoint, `normalize(payload)`, typed result verifiers,
-per-track images, stuck-claim sweeper, Linear and Asana adapters, k8s and ECS
-executors.
+per-track images, Linear and Asana adapters, k8s and ECS executors. The
+stuck-claim sweeper, once deferred here, is now expressible as a sweep track
+(§4) rather than Tina code.
 
 ---
 
