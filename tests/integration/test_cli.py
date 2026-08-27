@@ -18,7 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 import tina
-from tina import cli, config, executors, harness, log, sources, verify
+from tina import cli, config, control, executors, harness, log, sources, verify
 from tina.models import OutcomeReport, OutcomeStatus, WorkItem
 from tina.sources.base import ClaimPrognosis
 
@@ -778,6 +778,162 @@ def test_run_help_lists_the_dry_run_flag() -> None:
 
     assert result.exit_code == 0
     assert "--dry-run" in plain(result.output)
+
+
+# --- the control plane: paused and max_concurrency ---------------------------
+
+
+class NoQuerySource(FakeSource):
+    """A tracker that fails the test if the query a paused dispatch must skip runs."""
+
+    def query(self, q: str) -> list[WorkItem]:
+        raise AssertionError("a paused dispatch must never query")
+
+
+def test_a_paused_dispatch_exits_zero_and_enqueues_nothing(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paused is working as intended, not an error."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+    source, executor = NoQuerySource(items("VUL-1")), FakeExecutor()
+    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert executor.enqueued == []
+    assert any(line["message"] == "dispatch paused" for line in json_lines(result.stdout))
+
+
+def test_a_paused_dispatch_needs_no_tracker_credentials(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kill switch fires before the source is built: no JIRA_* env, still 0."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+
+
+def test_max_concurrency_lowers_the_limit(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, executor = wired
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 2")
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--limit", "5", "--config", str(project)]
+    )
+    record = next(line for line in json_lines(result.stdout) if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
+    assert record["limit"] == 5
+    assert record["effective_limit"] == 2
+    assert record["limit_origin"] == "max_concurrency"
+
+
+def test_the_limit_stands_when_below_max_concurrency(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control file can only lower the caller's ceiling, never raise it."""
+    _, executor = wired
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 5")
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--limit", "1", "--config", str(project)]
+    )
+    record = next(line for line in json_lines(result.stdout) if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1")]
+    assert record["effective_limit"] == 1
+    assert record["limit_origin"] == "--limit"
+
+
+def test_dispatch_without_a_control_plane_reports_its_own_limit(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The new fields are always present; nothing else about the record changed."""
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+    lines = json_lines(result.stdout)
+    record = next(line for line in lines if line["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert record["effective_limit"] == 1
+    assert record["limit_origin"] == "--limit"
+    assert all(line["message"] != "control policy" for line in lines), "defaults log nothing"
+
+
+def test_a_dry_run_reports_it_would_pause(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A preview that ignored the kill switch would mislead when it matters most."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--dry-run"]
+    )
+    line = next(line for line in json_lines(result.stdout) if line["message"] == "would pause")
+
+    assert result.exit_code == 0
+    assert line["dry_run"] is True
+    assert all(rec["message"] != "dispatch paused" for rec in json_lines(result.stdout))
+    assert "Would exit paused" in plain(result.stderr)
+
+
+def test_a_dry_run_previews_the_effective_limit(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 2")
+
+    result = runner.invoke(
+        cli.app,
+        ["dispatch", "--track", "vul", "--limit", "5", "--config", str(project), "--dry-run"],
+    )
+    previewed = [
+        line["item"] for line in json_lines(result.stdout) if line["message"] == "would enqueue"
+    ]
+
+    assert result.exit_code == 0
+    assert previewed == ["VUL-1", "VUL-2"]
+    assert "Would apply control policy from TINA_CONTROL_INLINE" in plain(result.stderr)
+    assert "2 items matched (limit 2)." in plain(result.stderr)
+
+
+def test_run_ignores_a_paused_control_plane(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An item already claimed is worth more finished than stopped."""
+    source, _ = wired
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert source.claims == ["VUL-1"]
+    assert last_record(result.stdout)["message"] == "run complete"
+
+
+def test_run_never_reads_the_control_plane(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I1, asserted by the absence of the call: the worker never sees policy."""
+
+    def fail(configured_path: Path | None = None) -> control.LoadedPolicy:
+        raise AssertionError("tina run must never read the control plane")
+
+    monkeypatch.setattr(control, "load", fail)
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exception is None
+    assert result.exit_code == 0
 
 
 # --- status: two counts, no writes ------------------------------------------

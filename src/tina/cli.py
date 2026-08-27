@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 import typer
 
-from tina import executors, harness, log, output, prompt, sources, verify
+from tina import control, executors, harness, log, output, prompt, sources, verify
 from tina.config import Config, TrackConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
@@ -139,10 +139,15 @@ def dispatch_track(
     executor: Executor | None = None,
     dry_run: bool = False,
 ) -> None:
-    """Query, take up to `limit` items, enqueue one worker each.
+    """Query, take up to the effective limit, enqueue one worker each.
 
     The dispatcher never runs an agent and never claims — workers claim, so a
     dispatcher that dies mid-loop leaves nothing stuck.
+
+    Policy is read here and nowhere else (ADR-011 I1): the worker never sees
+    the control file, so an in-flight run completes with the control plane
+    unavailable. Paused exits before the source is even built — a kill switch
+    must not depend on tracker credentials.
 
     `dry_run` moves the boundary to the last step only: the real source is built
     and the real query runs against the live tracker, but no executor is ever
@@ -153,20 +158,64 @@ def dispatch_track(
     fails at config load, whichever mode this runs in.
     """
     track = config.track(track_name)
+    policy = control.load(config.control_path())
+    if policy.paused:
+        _paused_dispatch(track, policy, dry_run)
+        return
+
+    effective, limit_origin = _effective_limit(limit, policy)
     source = source or sources.build(track)
     if dry_run:
-        _preview(config, track, source.query(track.query)[: max(limit, 0)], limit)
+        items = source.query(track.query)[: max(effective, 0)]
+        _preview(config, track, items, limit, effective, limit_origin, policy)
         return
 
     executor = executor or executors.build(config)
-    items = source.query(track.query)[: max(limit, 0)]
+    items = source.query(track.query)[: max(effective, 0)]
     logger.info(
         "dispatching",
-        extra={"track": track.name, "limit": limit, "matched": len(items)},
+        extra={
+            "track": track.name,
+            "limit": limit,
+            "effective_limit": effective,
+            "limit_origin": limit_origin,
+            "matched": len(items),
+        },
     )
     for item in items:
         executor.enqueue(track.name, item.id)
         logger.info("enqueued", extra=_item_fields(track.name, item, config.executor))
+
+
+def _effective_limit(limit: int, policy: control.LoadedPolicy) -> tuple[int, str]:
+    """`min(--limit, max_concurrency)`: the control file can only lower the cap.
+
+    The origin names which bound won, so a cycle that launched fewer workers
+    than expected is explainable from the dispatch record alone.
+    """
+    if policy.max_concurrency is not None and policy.max_concurrency < limit:
+        return policy.max_concurrency, "max_concurrency"
+    return limit, "--limit"
+
+
+def _paused_dispatch(track: TrackConfig, policy: control.LoadedPolicy, dry_run: bool) -> None:
+    """Exit 0 before any source query. A paused factory is working as intended.
+
+    The message is `would pause`, never `dispatch paused`, when previewing —
+    the same message discipline the other previews keep. A preview that
+    ignored the kill switch would mislead in the one situation a preview
+    matters most.
+    """
+    if not dry_run:
+        logger.info("dispatch paused", extra={"track": track.name, "control_origin": policy.origin})
+        return
+    logger.info(
+        "would pause",
+        extra={"track": track.name, "control_origin": policy.origin, "dry_run": True},
+    )
+    output.dry_run_header()
+    output.would(f"Would exit paused — control policy from {policy.origin}; no query would run")
+    output.dry_run_footer(action="exit paused without querying")
 
 
 def _item_fields(track: str, item: WorkItem, executor: str) -> dict[str, str]:
@@ -183,18 +232,43 @@ def _item_fields(track: str, item: WorkItem, executor: str) -> dict[str, str]:
     }
 
 
-def _preview(config: Config, track: TrackConfig, items: list[WorkItem], limit: int) -> None:
+def _preview(
+    config: Config,
+    track: TrackConfig,
+    items: list[WorkItem],
+    limit: int,
+    effective: int,
+    limit_origin: str,
+    policy: control.LoadedPolicy,
+) -> None:
     """The dry-run half: same query, same fields, no executor and no enqueue.
 
     The message is `would enqueue`, never `enqueued`, so a collector filtering
     on `message` can never count a preview as a real dispatch. The `dry_run`
     marker is added only here, so a normal dispatch carries no such key at all.
+
+    The policy line appears only when a control plane is configured: with
+    defaults there is no policy to report, and the preview stays byte-for-byte
+    what it was before the control plane existed.
     """
     logger.info(
         "dispatching",
-        extra={"track": track.name, "limit": limit, "matched": len(items), "dry_run": True},
+        extra={
+            "track": track.name,
+            "limit": limit,
+            "effective_limit": effective,
+            "limit_origin": limit_origin,
+            "matched": len(items),
+            "dry_run": True,
+        },
     )
     output.dry_run_header()
+    if policy.origin != "defaults":
+        throttle = "unset" if policy.max_concurrency is None else policy.max_concurrency
+        output.would(
+            f"Would apply control policy from {policy.origin}: max_concurrency {throttle},"
+            f" effective limit {effective} (from {limit_origin})"
+        )
     for item in items:
         line = f"Would enqueue {item.id} via {config.executor}"
         output.would(f"{line} — {item.title}" if item.title else line)
@@ -202,7 +276,7 @@ def _preview(config: Config, track: TrackConfig, items: list[WorkItem], limit: i
             "would enqueue",
             extra=_item_fields(track.name, item, config.executor) | {"dry_run": True},
         )
-    output.dry_run_footer(f"{len(items)} items matched (limit {limit}).")
+    output.dry_run_footer(f"{len(items)} items matched (limit {effective}).")
 
 
 def status_track(config: Config, track_name: str, source: Source | None = None) -> None:
