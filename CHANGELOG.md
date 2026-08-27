@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.2](https://github.com/raiderrobert/tina/compare/v0.1.1...v0.1.2) (2026-08-27)
+
+
+### Features
+
+* **control:** pause and throttle without a deploy (P0) ([#53](https://github.com/raiderrobert/tina/issues/53)) ([02fdc22](https://github.com/raiderrobert/tina/commit/02fdc226cc085455dae3f09f7b20feec2db0f1ae))
+* **prompt:** anchor relative skill references to the skill root ([#56](https://github.com/raiderrobert/tina/issues/56)) ([5d3533d](https://github.com/raiderrobert/tina/commit/5d3533d2989bff72f5670e38abd1ae136ea655f4))
+* **tracks:** lifecycle write-back on failure (P1) ([#54](https://github.com/raiderrobert/tina/issues/54)) ([4210253](https://github.com/raiderrobert/tina/commit/4210253a38542ebc13d7b1c614b570719f40d74b))
+* **tracks:** per-track model, claim policy, eligibility re-check, and env (P2) ([#55](https://github.com/raiderrobert/tina/issues/55)) ([554bc30](https://github.com/raiderrobert/tina/commit/554bc304eb5f73fdf6134761ae355b400259db2a))
+* **tracks:** sweep mode and harness artifact capture (P4) ([#57](https://github.com/raiderrobert/tina/issues/57)) ([2818e36](https://github.com/raiderrobert/tina/commit/2818e36186ed6f9445241c919b14154989f0a1a5))
+
+
+### Documentation
+
+* extract the demoed track into examples/bug-triage/ ([#31](https://github.com/raiderrobert/tina/issues/31)) ([ba90bb1](https://github.com/raiderrobert/tina/commit/ba90bb180ccf77bbdcfc4aa40744e3a40dc47cb7))
+
 ## [0.1.1](https://github.com/raiderrobert/tina/compare/v0.1.0...v0.1.1) (2026-07-30)
 
 
