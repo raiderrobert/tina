@@ -29,6 +29,10 @@ FIELDS = ["summary", "description", "assignee", "status", "labels"]
 #: number.
 EMPTY_ASSIGNEE = re.compile(r"\bassignee\s*(?:=|\bIS\b)\s*(?:EMPTY|NULL)\b", re.IGNORECASE)
 
+#: A trailing ORDER BY, stripped before the query is scoped to one item —
+#: it cannot sit inside the parenthesized predicate.
+ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE | re.DOTALL)
+
 
 class SearchRequest(BaseModel):
     """The JQL search body. Serialized with Jira's camelCase field names."""
@@ -125,6 +129,15 @@ class JiraSource:
 
     def get(self, item_id: str) -> WorkItem:
         return self._to_item(self._issue(item_id))
+
+    def matches(self, item_id: str, q: str) -> bool:
+        """One search: the configured query scoped to the one item.
+
+        The tracker evaluates the whole predicate, so whatever mechanism
+        excluded the item — assignment, status, a label — is caught here.
+        """
+        jql = f'({ORDER_BY.sub("", q)}) AND key = "{item_id}"'
+        return bool(self.query(jql))
 
     def claim(self, item: WorkItem) -> bool:
         """Take the item under the track's claim policy (ADR-014).

@@ -62,18 +62,25 @@ class FakeSource:
         claimable: bool = True,
         holder: str = "",
         held: list[WorkItem] | None = None,
+        matching: bool = True,
     ) -> None:
         self.items = items
         self.claimable = claimable
         self.holder = holder
         self.held = list(held or [])
+        self.matching = matching
         self.claims: list[str] = []
         self.annotations: list[tuple[str, str]] = []
         self.blocked: list[str] = []
+        self.rechecked: list[tuple[str, str]] = []
 
     def query(self, q: str) -> list[WorkItem]:
         self.queried = q
         return list(self.items)
+
+    def matches(self, item_id: str, q: str) -> bool:
+        self.rechecked.append((item_id, q))
+        return self.matching
 
     def get(self, item_id: str) -> WorkItem:
         return next(item for item in self.items if item.id == item_id)
@@ -773,6 +780,78 @@ def test_a_dry_run_under_claim_none_says_dedupe_is_the_querys_job(
     assert "command" in line, "the rest of the preview still happens"
 
 
+# --- the eligibility re-check: stale items exit before any write -------------
+
+
+def test_a_stale_item_exits_no_action_needed_before_any_claim(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assigned, closed, labeled, or worked between dispatch and worker start."""
+    source = wire(monkeypatch, FakeSource(items("VUL-1"), matching=False))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.claims == [], "the re-check comes before the claim write"
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert "no longer matches" in record["report"]["details"]
+
+
+def test_the_re_check_runs_under_claim_none_too(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claim = "none" is exactly what opens the hole the re-check closes."""
+    source = wire(monkeypatch, NoClaimSource(items("VUL-1"), matching=False))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(unclaiming)])
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert last_record(result.stdout)["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+
+
+def test_an_eligible_item_proceeds_to_the_claim(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    source, _ = wired
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.claims == ["VUL-1"]
+    assert last_record(result.stdout)["message"] == "run complete"
+
+
+def test_a_dry_run_surfaces_a_stale_verdict(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale means there is nothing after the re-check to preview."""
+    wire(monkeypatch, FakeSource(items("VUL-1"), matching=False))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(project)])
+    line = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert line["matches"] is False
+    assert line["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert set(line) & {"would_claim", "holder", "command"} == set()
+    assert "no longer matches" in plain(result.stderr)
+
+
+def test_a_dry_run_surfaces_an_eligible_verdict(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["matches"] is True
+
+
 # --- on_failure: a bad run leaves a trace and stops matching -----------------
 
 RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]
@@ -1020,6 +1099,7 @@ def test_a_dry_run_logs_one_would_run_line(project: Path, monkeypatch: pytest.Mo
         "dry_run",
         "track",
         "item",
+        "matches",
         "would_claim",
         "holder",
         "harness",

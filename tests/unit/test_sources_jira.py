@@ -336,6 +336,56 @@ def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
     assert source(handler, claim_policy="none").claimed("project = VUL") == []
 
 
+# --- matches: the configured query, scoped to one item -----------------------
+
+
+def test_matches_scopes_the_query_to_the_item() -> None:
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["jql"])
+        return httpx.Response(200, json={"issues": [issue()]})
+
+    eligible = source(handler).matches("VUL-1", "project = VUL AND assignee IS EMPTY")
+
+    assert eligible is True
+    assert sent == ['(project = VUL AND assignee IS EMPTY) AND key = "VUL-1"']
+
+
+def test_matches_strips_the_order_by_clause() -> None:
+    """`ORDER BY` cannot sit inside the parenthesized predicate."""
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content)["jql"])
+        return httpx.Response(200, json={"issues": [issue()]})
+
+    source(handler).matches("VUL-1", "project = VUL ORDER BY created DESC")
+
+    assert sent == ['(project = VUL) AND key = "VUL-1"']
+
+
+def test_a_gone_stale_item_no_longer_matches() -> None:
+    """The whole predicate is re-checked, so any exclusion mechanism works."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"issues": []})
+
+    assert source(handler).matches("VUL-1", "project = VUL") is False
+
+
+def test_matches_searches_and_never_writes() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        return httpx.Response(200, json={"issues": [issue()]})
+
+    source(handler).matches("VUL-1", "project = VUL")
+
+    assert calls == [("POST", SEARCH_PATH)], "one search, and nothing else"
+
+
 def test_http_error_is_a_source_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, text="forbidden")

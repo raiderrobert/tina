@@ -347,6 +347,63 @@ def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
     assert source(handler, claim_policy="none").claimed("repo:acme/api is:open") == []
 
 
+# --- matches: the query's structured qualifiers, re-checked in code ----------
+
+MATCHES_QUERY = "repo:acme/api is:issue is:open no:assignee label:bug -label:tina-blocked"
+
+
+def matching_source(payload: dict[str, Any]) -> GitHubSource:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "matches must never write"
+        assert request.url.path == f"/repos/{REPO}/issues/42", "one fetch, no search"
+        return httpx.Response(200, json=payload)
+
+    return source(handler)
+
+
+def test_a_still_eligible_issue_matches() -> None:
+    payload = issue(labels=["bug"], state="open")
+
+    assert matching_source(payload).matches("42", MATCHES_QUERY) is True
+
+
+def test_a_closed_issue_no_longer_matches() -> None:
+    payload = issue(labels=["bug"], state="closed")
+
+    assert matching_source(payload).matches("42", MATCHES_QUERY) is False
+
+
+def test_an_assigned_issue_no_longer_matches() -> None:
+    payload = issue(assignees=["alice"], labels=["bug"])
+
+    assert matching_source(payload).matches("42", MATCHES_QUERY) is False
+
+
+def test_an_issue_without_the_required_label_no_longer_matches() -> None:
+    assert matching_source(issue(labels=[])).matches("42", MATCHES_QUERY) is False
+
+
+def test_an_issue_carrying_a_negated_label_no_longer_matches() -> None:
+    """The blocked or claim label arrived between dispatch and worker start."""
+    payload = issue(labels=["bug", "tina-blocked"])
+
+    assert matching_source(payload).matches("42", MATCHES_QUERY) is False
+
+
+def test_matches_reads_quoted_label_tokens() -> None:
+    payload = issue(labels=["bug"])
+
+    assert matching_source(payload).matches("42", 'is:open label:"bug"') is True
+    assert matching_source(payload).matches("42", 'is:open -label:"bug"') is False
+
+
+def test_unstructured_qualifiers_are_the_dispatch_querys_job() -> None:
+    """repo: and is:issue were true at dispatch and cannot silently change."""
+    payload = issue(labels=["bug"])
+
+    assert matching_source(payload).matches("42", "repo:acme/api is:issue label:bug") is True
+
+
 # --- lifecycle write-back: annotate and block (ADR-013) ----------------------
 
 

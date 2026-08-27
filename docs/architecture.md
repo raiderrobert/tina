@@ -208,8 +208,20 @@ query. All judgment about what the item actually is happens inside the track.
 |---|---|---|
 | `query()` | dispatcher | run the configured query, return work items |
 | `claimed(q)` | `status` | the same query with its unclaimed clause inverted: what workers hold now |
+| `matches(item_id, q)` | worker | re-check the whole query against one item at worker start |
 | `claim(item)` | worker | mark the item as taken; fail if already claimed |
 | `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
+
+`matches` is the eligibility re-check: between dispatch and worker start an
+item can be assigned, closed, labeled, or worked by a human, and only the
+claim would notice — and only the assignee case. The worker re-checks the
+full track query scoped to the one item, before claiming, and exits
+`no_action_needed` when it no longer matches. Re-checking the whole
+predicate rather than existence is the point: it works for every exclusion
+mechanism, and under `claim = "none"` it is the only guard. Jira evaluates
+it as one search (`(query) AND key = <item>`, ORDER BY stripped); GitHub
+search has no number qualifier, so the adapter fetches the issue and
+re-checks the structured qualifiers in code.
 
 v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
 implementation makes the interface accidentally Jira-shaped, and an OSS project

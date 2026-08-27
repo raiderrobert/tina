@@ -350,6 +350,23 @@ def run_item(
     executor = executor or executors.build(config)
     run_url = executor.run_url()
 
+    # The eligibility re-check (ADR-014): between dispatch and worker start the
+    # item can be assigned, closed, labeled, or worked by a human. Before any
+    # write, for every track — under claim = "none" it is the only guard.
+    if not source.matches(item.id, track.query):
+        logger.info("no longer matches", extra={"track": track.name, "item": item.id})
+        return _record(
+            track.name,
+            item.id,
+            OutcomeReport(
+                outcome=OutcomeStatus.NO_ACTION_NEEDED,
+                details="the item no longer matches the track query",
+            ),
+            exit_code=None,
+            started=started,
+            run_url=run_url,
+        )
+
     if track.claim != "none" and not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
         return _record(
@@ -395,6 +412,18 @@ def _preview_run(
     """
     fields: dict[str, Any] = {"dry_run": True, "track": track.name, "item": item.id}
     output.dry_run_header("nothing will be claimed and no agent will run")
+
+    fields["matches"] = source.matches(item.id, track.query)
+    if not fields["matches"]:
+        output.would(
+            f"Would not run {item.id} — it no longer matches the track query;"
+            f" the run would exit {OutcomeStatus.NO_ACTION_NEEDED}"
+        )
+        fields["effective_status"] = OutcomeStatus.NO_ACTION_NEEDED
+        output.dry_run_footer(action=f"exit {OutcomeStatus.NO_ACTION_NEEDED} without claiming")
+        fields["duration_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("would run", extra=fields)
+        return
 
     if track.claim == "none":
         # No claim and no prognosis to preview — the query is the dedupe.

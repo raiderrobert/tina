@@ -134,6 +134,17 @@ class GitHubSource:
     def get(self, item_id: str) -> WorkItem:
         return self._to_item(self._issue(_number(item_id)))
 
+    def matches(self, item_id: str, q: str) -> bool:
+        """Fetch the issue and re-check the query's structured qualifiers.
+
+        Search has no number qualifier, so the predicate is evaluated in code:
+        state, assignee emptiness, `label:` present, `-label:` absent — the
+        same token grammar `claimed_search` scans. Qualifiers outside that set
+        (`repo:`, `is:issue`) were true at dispatch and cannot silently change,
+        so they pass.
+        """
+        return _matches_qualifiers(self._issue(_number(item_id)), q)
+
     def claim(self, item: WorkItem) -> bool:
         """Take the item under the track's claim policy (ADR-014).
 
@@ -293,6 +304,39 @@ def claimed_label_search(q: str, label: str) -> str:
             fix=f"Add `-label:{label}` to the track query so dispatch skips claimed issues.",
         )
     return " ".join(f"label:{label}" if token.lower() in negated else token for token in tokens)
+
+
+#: The state qualifiers the re-check understands, in both spellings.
+_STATE_QUALIFIERS = {
+    "is:open": "open",
+    "state:open": "open",
+    "is:closed": "closed",
+    "state:closed": "closed",
+}
+
+
+def _matches_qualifiers(issue: Issue, q: str) -> bool:
+    """Evaluate the query's structured qualifiers against a fetched issue."""
+    labels = {name.lower() for name in issue.label_names}
+    for token in q.split():
+        lowered = token.lower()
+        if lowered in _STATE_QUALIFIERS:
+            if issue.state != _STATE_QUALIFIERS[lowered]:
+                return False
+        elif lowered == NO_ASSIGNEE:
+            if issue.assignees:
+                return False
+        elif lowered.startswith("label:"):
+            if _label_value(lowered) not in labels:
+                return False
+        elif lowered.startswith("-label:") and _label_value(lowered.removeprefix("-")) in labels:
+            return False
+    return True
+
+
+def _label_value(token: str) -> str:
+    """The label a `label:` token names, unquoted and lowercased."""
+    return token.split(":", 1)[1].strip('"').lower()
 
 
 def _number(item_id: str) -> str:
