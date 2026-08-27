@@ -400,7 +400,8 @@ separate control file, read fresh by the dispatcher every cycle, failing
 closed. The plane split and its invariants are argued in
 [ADR-011](adr/011-control-plane-data-plane-split.md); the file's transport —
 a path Tina reads, never an object Tina fetches — in
-[ADR-012](adr/012-control-file-is-a-path.md).
+[ADR-012](adr/012-control-file-is-a-path.md). Per-platform mount recipes are
+in [control.md](control.md).
 
 ---
 

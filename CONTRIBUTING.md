@@ -56,6 +56,7 @@ src/tina/
 ├── cli.py           # `tina dispatch` and `tina run` — two roles, one image
 ├── __main__.py      # `python -m tina`, how the local executor spawns workers
 ├── config.py        # TOML configuration
+├── control.py       # Runtime policy: paused and max_concurrency, fail-closed
 ├── models.py        # Work items in, outcome reports out
 ├── prompt.py        # One-shot prompt assembly
 ├── harness.py       # Harness invocation
@@ -73,6 +74,7 @@ src/tina/
 
 tests/                 # conftest.py + unit/ (per-module) + integration/ (through the CLI)
 docs/architecture.md   # System design
+docs/control.md        # The control file: mount recipes per platform
 docs/adr/              # Architecture decision records
 examples/tina.toml     # Worked configuration: every configurable surface in one file
 examples/bug-triage/   # One complete track — the one the README recording runs
