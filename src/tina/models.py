@@ -7,6 +7,11 @@ from typing import Any
 
 from pydantic import AnyHttpUrl, BaseModel, Field
 
+#: What stands in for the item id when a worker has none — the run record of a
+#: sweep run, and the executor's `running()` entry for an item-less worker.
+#: Stable, so anything grouping either by item sees one series per sweep track.
+SWEEP_ITEM = "sweep"
+
 
 class WorkItem(BaseModel):
     """One unit of work, normalized out of whatever tracker produced it."""

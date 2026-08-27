@@ -102,6 +102,19 @@ Two roles, one image.
 **Dispatcher** runs the source query, takes up to N items, and enqueues N worker
 jobs through an executor. It never runs an agent.
 
+N is a budget over live workers, not launches per call:
+`max(0, min(--limit, max_concurrency) − in flight)`, where in flight is what
+the executor's `running()` reports for the track
+([ADR-016](adr/016-dispatch-budgets-by-live-executor-state.md)). Without the
+subtraction, a 15-minute scheduler launching the full limit against hour-long
+runs multiplies the knob by four to twelve. Items already in flight are
+skipped, not re-enqueued — the dedupe `claim = "none"` tracks need, since
+their query still matches an item a worker holds. The execution list is
+queried fresh each cycle and never stored; the same gate holds a sweep
+dispatch while its one worker is still out. A dry run builds no executor, so
+it assumes zero in flight and says so when that is an assumption rather than
+a fact.
+
 **Worker** takes a single work item identifier, claims it, runs the agent once,
 and records the outcome. One item = one run = one container = one log stream.
 
@@ -298,12 +311,22 @@ acceptable because duplicate workers are already the tolerated failure mode.
 
 ## 10. Executors
 
-The executor is how the dispatcher enqueues workers.
+The executor is how the dispatcher enqueues workers, and the only thing that
+knows which of them are still running.
 
 | Executor | Mechanism |
 |---|---|
 | `local` | subprocess. Dev and CLI use. |
 | `cloudrun` | create a Cloud Run job execution against the same image. |
+
+`running(track)` reports the track's workers still in flight, one item id per
+worker, with the stable `sweep` marker standing in for an item-less one — the
+count the dispatch budget subtracts (§5). `local` returns an empty list
+honestly: its workers finish inside `enqueue`. `cloudrun` lists the job's
+executions newest first, keeps the ones with no completion time, and reads
+the item id back from the args overrides `enqueue` set; it stops after 200
+executions, because workers have finite timeouts and the deeper tail is all
+terminal in practice.
 
 v1 ships both. `local` is not optional — it is how anyone tries Tina. A single
 executor would make the interface accidentally Cloud Run-shaped. k8s Jobs, ECS,

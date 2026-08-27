@@ -28,6 +28,16 @@ class Executor(Protocol):
         """
         ...
 
+    def running(self, track: str) -> list[str]:
+        """Item ids of this track's workers still in flight, one entry each.
+
+        An item-less sweep worker appears as the stable sweep marker
+        (`models.SWEEP_ITEM`), so counting entries counts workers. Queried
+        fresh on every call — the executor's own execution list is the record,
+        never anything Tina stored (ADR-016).
+        """
+        ...
+
 
 class ExecutorError(TinaError, RuntimeError):
     """An executor could not enqueue a worker."""
