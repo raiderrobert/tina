@@ -1178,6 +1178,11 @@ def test_a_dry_run_assembles_the_real_prompt(
     """Read what was written, not merely that a path was printed."""
     wire(monkeypatch, FakeSource(items("VUL-1")))
 
+    track_dir = project.parent / "tracks" / "remediate"
+    (track_dir / "SKILL.md").write_text(
+        "---\nname: remediate\n---\n\n# Remediate the vulnerability\n"
+    )
+
     result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(project)])
     line = last_record(result.stdout)
     prompt_file = Path(line["prompt_file"])
@@ -1185,6 +1190,8 @@ def test_a_dry_run_assembles_the_real_prompt(
 
     assert prompt_file.name == "prompt.md"
     assert "Remediate the vulnerability" in text, "the track skill is in the prompt"
+    assert str(track_dir.resolve()) in text, "the prompt is anchored to the skill root"
+    assert "name: remediate" not in text, "frontmatter is stripped"
     assert "VUL-1" in text, "the work item is in the prompt"
     assert str(prompt_file.parent / "outcome.json") in text, "and where to write the outcome"
     assert line["prompt_chars"] == len(text)

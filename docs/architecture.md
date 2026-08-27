@@ -321,6 +321,13 @@ tracks — and a track setting `model` under a command that never references it
 is equally a config-load error, because the value would silently not reach the
 harness.
 
+The assembled prompt opens by naming the absolute skill directory. Skills past
+a few hundred lines are multi-file (`paths/`, `references/`, `scripts/`), the
+agent runs with its working directory set to the run's temp workdir, and
+without the anchor every relative reference in the skill resolves nowhere.
+`SKILL.md`'s leading YAML frontmatter is stripped before inlining — it is
+adapter metadata, not prompt content.
+
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
 output path in the prompt and instructs the agent to write `outcome.json` there
