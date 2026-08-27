@@ -41,6 +41,40 @@ def test_all_four_outcomes_are_described(tmp_path: Path, work_item: WorkItem) ->
         assert status in text
 
 
+def test_prompt_opens_by_naming_the_skill_root(tmp_path: Path, work_item: WorkItem) -> None:
+    directory = track(tmp_path)
+    text = prompt.build(directory, work_item, tmp_path / "outcome.json")
+
+    head = "\n".join(text.splitlines()[:4])
+    assert str(directory.resolve()) in head
+    assert text.index(str(directory.resolve())) < text.index("Fix the vulnerability.")
+
+
+def test_frontmatter_is_stripped_before_inlining(tmp_path: Path, work_item: WorkItem) -> None:
+    skill = "---\nname: remediate\ndescription: Fixes CVEs.\n---\n\nFix the vulnerability.\n"
+    text = prompt.build(track(tmp_path, skill), work_item, tmp_path / "outcome.json")
+
+    assert "name: remediate" not in text
+    assert "Fix the vulnerability." in text
+
+
+def test_a_horizontal_rule_mid_skill_is_not_frontmatter(
+    tmp_path: Path, work_item: WorkItem
+) -> None:
+    skill = "# Remediate\n\nFix the vulnerability.\n\n---\n\nText after the rule.\n"
+    text = prompt.build(track(tmp_path, skill), work_item, tmp_path / "outcome.json")
+
+    assert "Text after the rule." in text
+    assert "\n---\n" in text
+
+
+def test_unclosed_frontmatter_is_left_as_is(tmp_path: Path, work_item: WorkItem) -> None:
+    skill = "---\nname: remediate\nno closing delimiter\n"
+    text = prompt.build(track(tmp_path, skill), work_item, tmp_path / "outcome.json")
+
+    assert "no closing delimiter" in text
+
+
 def test_missing_skill_points_at_napoln(tmp_path: Path, work_item: WorkItem) -> None:
     with pytest.raises(prompt.PromptError) as excinfo:
         prompt.build(tmp_path / "tracks" / "nope", work_item, tmp_path / "outcome.json")

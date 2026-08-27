@@ -18,6 +18,16 @@ class PromptError(TinaError, RuntimeError):
     """The track skill could not be read."""
 
 
+SKILL_ROOT_ANCHOR = """\
+The skill below lives at:
+
+    {skill_root}
+
+Every relative reference in it — paths/..., references/..., scripts/... —
+resolves against that directory, not against your working directory.
+"""
+
+
 OUTCOME_INSTRUCTIONS = """\
 ## Reporting the outcome
 
@@ -53,9 +63,10 @@ If this file is missing when you exit, the run is recorded as failed.
 
 def build(track_dir: Path, item: WorkItem, outcome_path: Path) -> str:
     """Assemble the full prompt handed to the harness."""
-    skill = read_skill(track_dir)
+    skill = strip_frontmatter(read_skill(track_dir))
     return "\n".join(
         [
+            SKILL_ROOT_ANCHOR.format(skill_root=track_dir.resolve()),
             skill.rstrip(),
             "",
             "## Work item",
@@ -69,6 +80,21 @@ def build(track_dir: Path, item: WorkItem, outcome_path: Path) -> str:
             OUTCOME_INSTRUCTIONS.format(outcome_path=outcome_path),
         ]
     )
+
+
+def strip_frontmatter(skill: str) -> str:
+    """Drop a leading YAML frontmatter block (`---` ... `---`).
+
+    Frontmatter is adapter metadata, not prompt content. A block that opens
+    but never closes is left as-is rather than truncating the skill.
+    """
+    lines = skill.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return skill
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "".join(lines[index + 1 :]).lstrip("\n")
+    return skill
 
 
 def read_skill(track_dir: Path) -> str:
