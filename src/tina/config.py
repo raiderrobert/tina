@@ -42,7 +42,7 @@ PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir"})
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 
 # Top-level scalars, as opposed to tables that define adapters or tracks.
-_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir"})
+_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
 
@@ -144,6 +144,9 @@ class Config(BaseModel):
     harness: str
     executor: str = "local"
     tracks_dir: Path = Path("tracks")
+    # Where the control file lives, when the deployment does not use
+    # TINA_CONTROL. None means no control plane configured here.
+    control: Path | None = None
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
     executors: ExecutorOptions = Field(default_factory=ExecutorOptions)
     tracks: dict[str, TrackConfig] = Field(default_factory=dict)
@@ -172,6 +175,12 @@ class Config(BaseModel):
         if not base.is_absolute():
             base = self.path.parent / base
         return base / track.track
+
+    def control_path(self) -> Path | None:
+        """Absolute path of the control file, resolved against the config file."""
+        if self.control is None or self.control.is_absolute():
+            return self.control
+        return self.path.parent / self.control
 
 
 def load(path: Path | str) -> Config:
@@ -230,6 +239,7 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
             "harness": raw["harness"],
             "executor": raw.get("executor", "local"),
             "tracks_dir": raw.get("tracks_dir", "tracks"),
+            "control": raw.get("control"),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
             "tracks": tracks,

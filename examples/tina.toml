@@ -8,6 +8,11 @@ harness = "pi"
 executor = "local"
 tracks_dir = "tracks"
 
+# Runtime policy (paused, max_concurrency) lives in a separate control file,
+# read fresh on every dispatch. Optional; absent means defaults. The env vars
+# TINA_CONTROL and TINA_CONTROL_INLINE override it — see docs/control.md.
+# control = "/mnt/config/control.toml"
+
 [harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
 
