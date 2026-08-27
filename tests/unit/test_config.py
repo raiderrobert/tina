@@ -94,6 +94,30 @@ def test_a_disabled_github_track_still_requires_repo(tmp_path: Path) -> None:
         config.load(write(tmp_path, text))
 
 
+def test_on_failure_defaults_to_leave(tmp_path: Path) -> None:
+    """The conservative choice: annotating writes to the tracker unasked."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").on_failure == "leave"
+    assert cfg.track("vul").blocked_label == "tina-blocked"
+
+
+def test_on_failure_annotate_is_kept(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + '\non_failure = "annotate"\n'))
+
+    assert cfg.track("vul").on_failure == "annotate"
+
+
+def test_an_unknown_on_failure_value_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="on_failure"):
+        config.load(write(tmp_path, MINIMAL + '\non_failure = "retry"\n'))
+
+
+def test_an_empty_blocked_label_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="blocked_label"):
+        config.load(write(tmp_path, MINIMAL + '\nblocked_label = ""\n'))
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))

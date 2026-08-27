@@ -141,6 +141,9 @@ class TrackConfig(BaseModel):
     # The exclusion marker `block()` applies — a label on both trackers. The
     # track query has to exclude it, or blocked items match again (ADR-013).
     blocked_label: str = Field(default="tina-blocked", min_length=1)
+    # What a bad run leaves on the item: "leave" retries it next cycle;
+    # "annotate" comments the effective status and applies `blocked_label`.
+    on_failure: Literal["leave", "annotate"] = "leave"
 
 
 class Config(BaseModel):

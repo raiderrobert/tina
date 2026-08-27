@@ -371,7 +371,9 @@ def run_item(
         result = harness.run(harness_config, text, workdir)
 
     report = verify.verify(result.report)
-    return _record(track.name, item.id, report, result.exit_code, started, run_url)
+    record = _record(track.name, item.id, report, result.exit_code, started, run_url)
+    _write_back(track, source, item, record)
+    return record
 
 
 def _preview_run(
@@ -442,6 +444,50 @@ def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[
         "prompt_file": str(prompt_file),
         "prompt_chars": len(text),
     }
+
+
+#: Effective statuses that trigger write-back: the runs a human must be told
+#: about. A lying `resolved` arrives here as `needs_human` via verification.
+WRITE_BACK_STATUSES = frozenset({OutcomeStatus.FAILED, OutcomeStatus.NEEDS_HUMAN})
+
+#: Details longer than this are cut from the failure comment. The comment is
+#: a pointer to the run, not a transcript of it.
+_DETAILS_LIMIT = 1000
+
+
+def _write_back(track: TrackConfig, source: Source, item: WorkItem, record: RunRecord) -> None:
+    """Leave a trace of a bad run on the item, and stop the query matching it.
+
+    Runs after the record is logged, so a write-back problem can never change
+    the recorded outcome — and the adapters' `annotate` and `block` never
+    raise (ADR-013). Clean outcomes write nothing; so does `on_failure =
+    "leave"`, the default, since annotating writes to the tracker and no
+    existing deployment asked for that.
+    """
+    if track.on_failure != "annotate" or record.effective_status not in WRITE_BACK_STATUSES:
+        return
+    source.annotate(item, _failure_comment(record))
+    source.block(item)
+
+
+def _failure_comment(record: RunRecord) -> str:
+    """The effective status, the agent's details, and the log link.
+
+    When the executor cannot name its logs the link line is simply absent —
+    a comment must never say "logs unavailable" where a pointer belongs.
+    """
+    status = f"run ended {record.effective_status}"
+    if record.report.verified is False:
+        status += " (the agent reported resolved, but artifact verification failed)"
+    lines = [f"tina: {status}; blocking this item from re-dispatch."]
+    if record.report.details:
+        details = record.report.details
+        if len(details) > _DETAILS_LIMIT:
+            details = details[:_DETAILS_LIMIT] + "…"
+        lines.append(details)
+    if record.run_url:
+        lines.append(f"Run logs: {record.run_url}")
+    return "\n\n".join(lines)
 
 
 def _record(
