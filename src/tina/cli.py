@@ -479,6 +479,7 @@ def run_item(
         workdir = Path(tmp)
         text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
         result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
+        harness.capture(result.session_dir, config.artifacts_path(), item.id)
 
     report = verify.verify(result.report)
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)
@@ -516,6 +517,7 @@ def _run_sweep(
         workdir = Path(tmp)
         text = prompt.build(config.track_dir(track), None, harness.outcome_path(workdir))
         result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
+        harness.capture(result.session_dir, config.artifacts_path(), SWEEP_ITEM)
 
     report = verify.verify(result.report)
     return _record(track.name, SWEEP_ITEM, report, result.exit_code, started, run_url)
@@ -593,7 +595,9 @@ def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem | None) -
     workdir = Path(tempfile.mkdtemp(prefix="tina-"))
     text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
     prompt_file = harness.write_prompt(text, workdir)
-    command = harness_config.command.render(prompt_file, workdir, model=track.model)
+    command = harness_config.command.render(
+        prompt_file, workdir, model=track.model, session_dir=harness.session_path(workdir)
+    )
 
     output.would(f"Prompt assembled: {prompt_file} ({len(text)} chars)")
     output.would(f"Would run: {shlex.join(command)}")

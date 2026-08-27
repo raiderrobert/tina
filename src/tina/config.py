@@ -35,14 +35,14 @@ SOURCES = ("jira", "github")
 EXECUTORS = ("local", "cloudrun")
 
 #: The only substitutions a harness command line may reference.
-PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir", "model"})
+PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir", "model", "session_dir"})
 # Hyphens are matched so that `{prompt-file}` is reported as the typo it is,
 # rather than falling through to the vaguer "no {prompt_file}" complaint. JSON
 # and shell brace expansions do not match: they contain quotes, colons, commas.
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 
 # Top-level scalars, as opposed to tables that define adapters or tracks.
-_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control"})
+_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control", "artifacts_dir"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
 #: The namespace of environment variables tina itself owns (TINA_CONTROL,
@@ -109,11 +109,19 @@ class ArgvTemplate(BaseModel):
             match.group(1) == name for arg in self.args for match in _PLACEHOLDER.finditer(arg)
         )
 
-    def render(self, prompt_file: Path, outcome_dir: Path, model: str | None = None) -> list[str]:
+    def render(
+        self,
+        prompt_file: Path,
+        outcome_dir: Path,
+        model: str | None = None,
+        session_dir: Path | None = None,
+    ) -> list[str]:
         """Substitute the run-specific values. Everything else passes through."""
         substitutions = {"{prompt_file}": str(prompt_file), "{outcome_dir}": str(outcome_dir)}
         if model is not None:
             substitutions["{model}"] = model
+        if session_dir is not None:
+            substitutions["{session_dir}"] = str(session_dir)
         rendered = []
         for arg in self.args:
             for token, value in substitutions.items():
@@ -256,6 +264,9 @@ class Config(BaseModel):
     # Where the control file lives, when the deployment does not use
     # TINA_CONTROL. None means no control plane configured here.
     control: Path | None = None
+    # Where each run's session directory gets copied after the harness exits.
+    # None skips the copy; {session_dir} still substitutes either way.
+    artifacts_dir: Path | None = None
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
     executors: ExecutorOptions = Field(default_factory=ExecutorOptions)
     tracks: dict[str, TrackConfig] = Field(default_factory=dict)
@@ -290,6 +301,12 @@ class Config(BaseModel):
         if self.control is None or self.control.is_absolute():
             return self.control
         return self.path.parent / self.control
+
+    def artifacts_path(self) -> Path | None:
+        """Absolute path of the artifacts directory, resolved against the config file."""
+        if self.artifacts_dir is None or self.artifacts_dir.is_absolute():
+            return self.artifacts_dir
+        return self.path.parent / self.artifacts_dir
 
 
 def load(path: Path | str) -> Config:
@@ -349,6 +366,7 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
             "executor": raw.get("executor", "local"),
             "tracks_dir": raw.get("tracks_dir", "tracks"),
             "control": raw.get("control"),
+            "artifacts_dir": raw.get("artifacts_dir"),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
             "tracks": tracks,

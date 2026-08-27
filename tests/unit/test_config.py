@@ -449,8 +449,44 @@ def test_a_typo_in_a_placeholder_is_not_passed_through(tmp_path: Path) -> None:
 
 def test_an_unknown_placeholder_names_what_is_supported(tmp_path: Path) -> None:
     text = MINIMAL.replace("{prompt_file}", "{workdir}")
-    with pytest.raises(config.ConfigError, match=r"\{model\}, \{outcome_dir\}, \{prompt_file\}"):
+    with pytest.raises(
+        config.ConfigError,
+        match=r"\{model\}, \{outcome_dir\}, \{prompt_file\}, \{session_dir\}",
+    ):
         config.load(write(tmp_path, text))
+
+
+def test_argv_template_renders_the_session_dir(tmp_path: Path) -> None:
+    template = config.ArgvTemplate(args=["agent", "{prompt_file}", "--session={session_dir}"])
+
+    rendered = template.render(tmp_path / "prompt.md", tmp_path, session_dir=tmp_path / "session")
+
+    assert rendered == [
+        "agent",
+        str(tmp_path / "prompt.md"),
+        f"--session={tmp_path / 'session'}",
+    ]
+
+
+def test_artifacts_dir_defaults_to_none(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.artifacts_dir is None
+    assert cfg.artifacts_path() is None
+
+
+def test_a_relative_artifacts_dir_resolves_against_the_config_file(tmp_path: Path) -> None:
+    text = MINIMAL.replace('harness = "pi"', 'harness = "pi"\nartifacts_dir = "artifacts"', 1)
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.artifacts_path() == tmp_path / "artifacts"
+
+
+def test_an_absolute_artifacts_dir_is_kept(tmp_path: Path) -> None:
+    text = MINIMAL.replace('harness = "pi"', 'harness = "pi"\nartifacts_dir = "/mnt/artifacts"', 1)
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.artifacts_path() == Path("/mnt/artifacts")
 
 
 def test_a_command_without_the_prompt_is_rejected(tmp_path: Path) -> None:

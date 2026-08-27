@@ -331,8 +331,8 @@ Singular `harness` selects; plural `[harnesses.<name>]` defines. TOML will not l
 one key be both a string and a table, so the two cannot share a name. `executor`
 and `[executors.<name>]` work the same way.
 
-The command may reference three placeholders: `{prompt_file}`, `{outcome_dir}`,
-and `{model}`. A command referencing `{model}` requires every track to set
+The command may reference four placeholders: `{prompt_file}`, `{outcome_dir}`,
+`{model}`, and `{session_dir}`. A command referencing `{model}` requires every track to set
 `model` — small fast models for triage tracks, frontier ones for code-change
 tracks — and a track setting `model` under a command that never references it
 is equally a config-load error, because the value would silently not reach the
@@ -344,6 +344,19 @@ agent runs with its working directory set to the run's temp workdir, and
 without the anchor every relative reference in the skill resolves nowhere.
 `SKILL.md`'s leading YAML frontmatter is stripped before inlining — it is
 adapter metadata, not prompt content.
+
+`{session_dir}` is where the harness leaves its session — the transcript, tool
+calls, and token costs the final message never shows. A command referencing it
+gets a fresh directory per run; one that never references it gets no directory
+created. The worker's temp directory deletes the session on the way out, so
+the optional top-level `artifacts_dir` key names where to keep it: after the
+harness exits, whatever landed in the session directory is copied to
+`<artifacts_dir>/<item>/` (`sweep` for a sweep run), for any outcome. The copy
+is best-effort — a capture failure is logged and never fails the run — and the
+destination is just a path, so a bucket mount works with no cloud code in
+Tina, the same reasoning as the control file. `artifacts_dir` unset skips the
+copy silently; `{session_dir}` still substitutes, so one harness table works
+in both environments.
 
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an

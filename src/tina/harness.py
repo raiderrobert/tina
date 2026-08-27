@@ -9,6 +9,7 @@ parsing per-harness output is where swappability rots. The agent writes
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ log = get_logger(__name__)
 
 OUTCOME_FILE = "outcome.json"
 PROMPT_FILE = "prompt.md"
+SESSION_DIR = "session"
 DEFAULT_TIMEOUT = 3600.0
 
 
@@ -32,11 +34,19 @@ class HarnessResult:
 
     report: OutcomeReport
     exit_code: int | None
+    # Where the harness left its session — transcript, tool calls, costs.
+    # None when the command never references {session_dir}.
+    session_dir: Path | None = None
 
 
 def outcome_path(workdir: Path) -> Path:
     """Where the agent is told to write its report."""
     return workdir / OUTCOME_FILE
+
+
+def session_path(workdir: Path) -> Path:
+    """Where {session_dir} points for this run."""
+    return workdir / SESSION_DIR
 
 
 def default_timeout() -> float:
@@ -75,10 +85,17 @@ def run(
     `env` is the track's table, merged over the inherited environment for the
     subprocess only — tina's own environment is never touched. Empty or None
     inherits unchanged.
+
+    A command referencing {session_dir} gets a fresh directory per run; one
+    that never references it gets no directory created at all.
     """
     prompt_file = write_prompt(prompt, workdir)
 
-    command = config.command.render(prompt_file, workdir, model=model)
+    session_dir = session_path(workdir) if config.command.uses("session_dir") else None
+    if session_dir is not None:
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+    command = config.command.render(prompt_file, workdir, model=model, session_dir=session_dir)
     log.info("harness starting", extra={"harness": config.name, "command": command})
 
     try:
@@ -96,6 +113,7 @@ def run(
                 details=f"agent timed out after {exc.timeout:g}s",
             ),
             exit_code=None,
+            session_dir=session_dir,
         )
     except OSError as exc:
         return HarnessResult(
@@ -104,10 +122,34 @@ def run(
                 details=f"could not start harness {config.name!r}: {exc}",
             ),
             exit_code=None,
+            session_dir=session_dir,
         )
 
     report = read_outcome(outcome_path(workdir), completed.returncode)
-    return HarnessResult(report=report, exit_code=completed.returncode)
+    return HarnessResult(report=report, exit_code=completed.returncode, session_dir=session_dir)
+
+
+def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> None:
+    """Copy the session directory's contents to `<artifacts_dir>/<item>/`.
+
+    Best-effort: a failure is logged and never raised, because losing the
+    evidence must not fail an otherwise-successful run. Either path being
+    None means there is nothing to do, and that is not worth a warning.
+    """
+    if session_dir is None or artifacts_dir is None:
+        return
+    try:
+        shutil.copytree(session_dir, artifacts_dir / item, dirs_exist_ok=True)
+    except Exception as exc:
+        log.warning(
+            "artifact capture failed",
+            extra={
+                "session_dir": str(session_dir),
+                "artifacts_dir": str(artifacts_dir),
+                "item": item,
+                "error": str(exc),
+            },
+        )
 
 
 def read_outcome(path: Path, exit_code: int) -> OutcomeReport:

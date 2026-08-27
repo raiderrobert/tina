@@ -1630,6 +1630,106 @@ def test_status_refuses_a_sweep_track(sweep_project: Path, no_source: None) -> N
     assert "sweep" in message
 
 
+# --- artifact capture: whatever landed in {session_dir} survives the run -----
+
+
+def with_session_capture(config_path: Path, artifacts: bool = True) -> Path:
+    """Point the fake command at {session_dir}, and set artifacts_dir when asked.
+
+    The agent writes a transcript there, so the assertion is on a file the
+    harness actually produced, not on the directory existing.
+    """
+    text = config_path.read_text()
+    text = text.replace('"{outcome_dir}"]', '"{outcome_dir}", "{session_dir}"]')
+    if artifacts:
+        text = text.replace(
+            'tracks_dir = "tracks"', 'tracks_dir = "tracks"\nartifacts_dir = "artifacts"'
+        )
+    config_path.write_text(text)
+    script = config_path.parent / "agent.py"
+    script.write_text(
+        script.read_text()
+        + "pathlib.Path(sys.argv[3], 'transcript.jsonl').write_text('turn one\\n')\n"
+    )
+    return config_path
+
+
+def test_session_files_arrive_under_the_item(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    with_session_capture(project)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["message"] == "run complete"
+    copied = project.parent / "artifacts" / "VUL-1" / "transcript.jsonl"
+    assert copied.read_text() == "turn one\n"
+
+
+def test_a_failed_run_is_still_captured(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Any outcome: a failing track is exactly when the transcript matters."""
+    with_session_capture(project)
+    outcome_written(project, {"outcome": "failed", "details": "plausible nonsense"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert (project.parent / "artifacts" / "VUL-1" / "transcript.jsonl").exists()
+
+
+def test_a_capture_failure_leaves_the_run_record_unchanged(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort: logged, never raised, and the record is what it would have been."""
+    with_session_capture(project)
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("bucket mount went away")
+
+    monkeypatch.setattr(harness.shutil, "copytree", boom)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+    record = last_record(result.stdout)
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert record["message"] == "run complete"
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert any(line["message"] == "artifact capture failed" for line in json_lines(result.stdout))
+
+
+def test_unset_artifacts_dir_copies_nothing_and_warns_nothing(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """{session_dir} still substitutes, so one harness table works everywhere."""
+    with_session_capture(project, artifacts=False)
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent wrote into {session_dir}"
+    assert not (project.parent / "artifacts").exists()
+    assert all("capture" not in line["message"] for line in json_lines(result.stdout)), (
+        "nothing to do is not a warning"
+    )
+
+
+def test_a_sweep_run_captures_under_the_sweep_marker(
+    sweep_project: Path, no_source: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with_session_capture(sweep_project)
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, ["run", "--track", "reap", "--config", str(sweep_project)])
+
+    assert result.exit_code == 0
+    copied = sweep_project.parent / "artifacts" / "sweep" / "transcript.jsonl"
+    assert copied.read_text() == "turn one\n"
+
+
 # --- status: two counts, no writes ------------------------------------------
 
 
