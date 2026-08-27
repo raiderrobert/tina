@@ -62,18 +62,25 @@ class FakeSource:
         claimable: bool = True,
         holder: str = "",
         held: list[WorkItem] | None = None,
+        matching: bool = True,
     ) -> None:
         self.items = items
         self.claimable = claimable
         self.holder = holder
         self.held = list(held or [])
+        self.matching = matching
         self.claims: list[str] = []
         self.annotations: list[tuple[str, str]] = []
         self.blocked: list[str] = []
+        self.rechecked: list[tuple[str, str]] = []
 
     def query(self, q: str) -> list[WorkItem]:
         self.queried = q
         return list(self.items)
+
+    def matches(self, item_id: str, q: str) -> bool:
+        self.rechecked.append((item_id, q))
+        return self.matching
 
     def get(self, item_id: str) -> WorkItem:
         return next(item for item in self.items if item.id == item_id)
@@ -688,6 +695,199 @@ def test_a_lost_claim_exits_no_action_needed(project: Path, records: io.StringIO
     assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
 
 
+# --- model: the track's model reaches the rendered command -------------------
+
+
+@pytest.fixture
+def modeled(project: Path) -> Path:
+    """The project config with a {model} command and a track model."""
+    text = project.read_text()
+    text = text.replace('"{outcome_dir}"]', '"{outcome_dir}", "{model}"]')
+    project.write_text(text + '\nmodel = "claude-sonnet-x"\n')
+    script = project.parent / "agent.py"
+    script.write_text(
+        AGENT + 'assert sys.argv[3] == "claude-sonnet-x", "model missing from argv"\n'
+    )
+    return project
+
+
+def test_a_real_run_hands_the_model_to_the_harness(
+    modeled: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The fake agent itself asserts the substituted argv, so a dropped model fails."""
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(modeled)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent's asserts all passed"
+
+
+def test_a_dry_run_previews_the_model_in_the_command(
+    modeled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(modeled)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["command"][-1] == "claude-sonnet-x"
+
+
+# --- claim = "none": no claim, no prognosis, dedupe is the query's job -------
+
+
+class NoPrognosisSource(NoClaimSource):
+    """A tracker that fails the test if claim or prognosis is asked for."""
+
+    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
+        raise AssertionError('claim = "none" must never ask for a prognosis')
+
+
+@pytest.fixture
+def unclaiming(project: Path) -> Path:
+    """The project config with the claim switched off."""
+    project.write_text(project.read_text() + '\nclaim = "none"\n')
+    return project
+
+
+def test_claim_none_runs_the_agent_without_claiming(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asserted by the absence of the call: the source fails the test if asked."""
+    wire(monkeypatch, NoPrognosisSource(items("VUL-1")))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(unclaiming)])
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["message"] == "run complete"
+
+
+def test_a_dry_run_under_claim_none_says_dedupe_is_the_querys_job(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No prognosis is asked for, and the preview says why there is none."""
+    wire(monkeypatch, NoPrognosisSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(unclaiming)])
+    line = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert "dedupe is the query's job" in plain(result.stderr)
+    assert set(line) & {"would_claim", "holder"} == set(), "no prognosis, no verdict fields"
+    assert "command" in line, "the rest of the preview still happens"
+
+
+# --- the eligibility re-check: stale items exit before any write -------------
+
+
+def test_a_stale_item_exits_no_action_needed_before_any_claim(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Assigned, closed, labeled, or worked between dispatch and worker start."""
+    source = wire(monkeypatch, FakeSource(items("VUL-1"), matching=False))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.claims == [], "the re-check comes before the claim write"
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert "no longer matches" in record["report"]["details"]
+
+
+def test_the_re_check_runs_under_claim_none_too(
+    unclaiming: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """claim = "none" is exactly what opens the hole the re-check closes."""
+    source = wire(monkeypatch, NoClaimSource(items("VUL-1"), matching=False))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(unclaiming)])
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert last_record(result.stdout)["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+
+
+def test_an_eligible_item_proceeds_to_the_claim(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    source, _ = wired
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.claims == ["VUL-1"]
+    assert last_record(result.stdout)["message"] == "run complete"
+
+
+def test_a_dry_run_surfaces_a_stale_verdict(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale means there is nothing after the re-check to preview."""
+    wire(monkeypatch, FakeSource(items("VUL-1"), matching=False))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(project)])
+    line = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert line["matches"] is False
+    assert line["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert set(line) & {"would_claim", "holder", "command"} == set()
+    assert "no longer matches" in plain(result.stderr)
+
+
+def test_a_dry_run_surfaces_an_eligible_verdict(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["matches"] is True
+
+
+# --- per-track env: the harness subprocess sees it; nothing else does --------
+
+
+@pytest.fixture
+def env_configured(project: Path) -> Path:
+    """The project config with a [vul.env] table, and an agent that checks it."""
+    project.write_text(project.read_text() + '\n[vul.env]\nTRIAGED_LABEL = "bot-triaged"\n')
+    script = project.parent / "agent.py"
+    script.write_text(
+        AGENT + 'import os\nassert os.environ["TRIAGED_LABEL"] == "bot-triaged", "env missing"\n'
+    )
+    return project
+
+
+def test_the_harness_subprocess_sees_the_track_env(
+    env_configured: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The fake agent itself asserts the variable, so a dropped table fails."""
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(env_configured)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent's asserts all passed"
+
+
+def test_dispatch_is_untouched_by_the_track_env(
+    env_configured: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The table is for the harness subprocess only; the dispatcher never reads it."""
+    _, executor = wired
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(env_configured)])
+
+    assert result.exit_code == 0
+    assert executor.enqueued == [("vul", "VUL-1")]
+
+
 # --- on_failure: a bad run leaves a trace and stops matching -----------------
 
 RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]
@@ -935,6 +1135,7 @@ def test_a_dry_run_logs_one_would_run_line(project: Path, monkeypatch: pytest.Mo
         "dry_run",
         "track",
         "item",
+        "matches",
         "would_claim",
         "holder",
         "harness",

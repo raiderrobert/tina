@@ -20,7 +20,7 @@ log = get_logger(__name__)
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
-FIELDS = ["summary", "description", "assignee", "status"]
+FIELDS = ["summary", "description", "assignee", "status", "labels"]
 
 #: The four spellings of "nobody holds this" that JQL accepts. `IS NOT EMPTY`
 #: deliberately does not match: `NOT` is neither `EMPTY` nor `NULL`, so the
@@ -28,6 +28,10 @@ FIELDS = ["summary", "description", "assignee", "status"]
 #: — it means the opposite, and silently inverting it would report the wrong
 #: number.
 EMPTY_ASSIGNEE = re.compile(r"\bassignee\s*(?:=|\bIS\b)\s*(?:EMPTY|NULL)\b", re.IGNORECASE)
+
+#: A trailing ORDER BY, stripped before the query is scoped to one item —
+#: it cannot sit inside the parenthesized predicate.
+ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE | re.DOTALL)
 
 
 class SearchRequest(BaseModel):
@@ -49,6 +53,7 @@ class IssueFields(BaseModel):
     # Atlassian Document Format: a tree Tina flattens rather than models.
     description: Any = None
     assignee: User | None = None
+    labels: list[str] = Field(default_factory=list)
 
 
 class Issue(BaseModel):
@@ -74,6 +79,15 @@ class SearchResult(BaseModel):
     issues: list[Issue] = Field(default_factory=list)
 
 
+class Transition(BaseModel):
+    id: str = ""
+    name: str = ""
+
+
+class TransitionList(BaseModel):
+    transitions: list[Transition] = Field(default_factory=list)
+
+
 class JiraSource:
     """Jira Cloud REST API v3."""
 
@@ -85,10 +99,16 @@ class JiraSource:
         base_url: str | None = None,
         bot_account_id: str | None = None,
         blocked_label: str = "tina-blocked",
+        claim_policy: str = "assign",
+        claim_label: str | None = None,
+        claim_transition: str | None = None,
     ) -> None:
         self.base_url = (base_url or require_env("JIRA_BASE_URL", "jira")).rstrip("/")
         self._bot_account_id = bot_account_id
         self.blocked_label = blocked_label
+        self.claim_policy = claim_policy
+        self.claim_label = claim_label
+        self.claim_transition = claim_transition
         if client is None:
             email = require_env("JIRA_EMAIL", "jira")
             token = require_env("JIRA_API_TOKEN", "jira")
@@ -110,14 +130,34 @@ class JiraSource:
     def get(self, item_id: str) -> WorkItem:
         return self._to_item(self._issue(item_id))
 
-    def claim(self, item: WorkItem) -> bool:
-        """Compare-and-set on the assignee field.
+    def matches(self, item_id: str, q: str) -> bool:
+        """One search: the configured query scoped to the one item.
 
-        Refuse if anyone already holds the issue, assign to the bot, then re-read
-        to confirm the write landed and was not overwritten.
+        The tracker evaluates the whole predicate, so whatever mechanism
+        excluded the item — assignment, status, a label — is caught here.
         """
-        if self._issue(item.id).fields.assignee is not None:
-            return False
+        jql = f'({ORDER_BY.sub("", q)}) AND key = "{item_id}"'
+        return bool(self.query(jql))
+
+    def claim(self, item: WorkItem) -> bool:
+        """Take the item under the track's claim policy (ADR-014).
+
+        Assign is a compare-and-set on the assignee field: refuse anyone else,
+        assign to the bot, re-read to confirm the write landed. An issue the
+        bot already holds re-claims successfully. A label claim is the same
+        shape with the claim label in place of the assignee — except that a
+        label carries no identity, so present always refuses. Either way, a
+        confirmed claim then applies `claim_transition` when the track set one.
+        """
+        taken = self._claim_by_label(item) if self.claim_policy == "label" else self._assign(item)
+        if taken and self.claim_transition:
+            self._apply_transition(item)
+        return taken
+
+    def _assign(self, item: WorkItem) -> bool:
+        assignee = self._issue(item.id).fields.assignee
+        if assignee is not None:
+            return assignee.account_id == self.bot_account_id
 
         self._request(
             "PUT",
@@ -128,26 +168,74 @@ class JiraSource:
         assignee = self._issue(item.id).fields.assignee
         return assignee is not None and assignee.account_id == self.bot_account_id
 
-    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
-        """The `GET` half of `claim`, with the `PUT` that follows it left off.
+    def _claim_by_label(self, item: WorkItem) -> bool:
+        if self.claim_label in self._issue(item.id).fields.labels:
+            return False
 
-        Jira's compare-and-set refuses *any* existing assignee — the bot
-        included — so anyone in the field is a claim that would not proceed.
+        self._request(
+            "PUT",
+            f"{ISSUE_PATH}/{item.id}",
+            json={"update": {"labels": [{"add": self.claim_label}]}},
+        )
+
+        return self.claim_label in self._issue(item.id).fields.labels
+
+    def _apply_transition(self, item: WorkItem) -> None:
+        """Move the claimed issue out of the queued status. Best-effort, like
+        the other lifecycle writes: the claim already stands, and a stale
+        status is the lesser bug than an assigned item left unworked."""
+        path = f"{ISSUE_PATH}/{item.id}/transitions"
+        try:
+            response = self._request("GET", path)
+            available = parse_payload(TransitionList, response, "jira", path).transitions
+            wanted = str(self.claim_transition).lower()
+            match = next((t for t in available if t.name.lower() == wanted), None)
+            if match is None:
+                log.warning(
+                    "claim transition not available",
+                    extra={"item": item.id, "transition": self.claim_transition},
+                )
+                return
+            self._request("POST", path, json={"transition": {"id": match.id}})
+        except SourceError as exc:
+            log.warning("claim transition failed", extra={"item": item.id, "error": str(exc)})
+            return
+        log.info("item transitioned", extra={"item": item.id, "transition": self.claim_transition})
+
+    def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
+        """The `GET` half of `claim`, with the write that follows it left off.
+
+        Consistent with each strategy: under assign the bot already holding
+        the issue is a claim that would proceed; under label a present claim
+        label refuses, whoever put it there.
         """
+        if self.claim_policy == "label":
+            if self.claim_label in self._issue(item.id).fields.labels:
+                return ClaimPrognosis(would_claim=False, holder=f"label:{self.claim_label}")
+            return ClaimPrognosis(would_claim=True, holder="")
         assignee = self._issue(item.id).fields.assignee
         if assignee is None:
             return ClaimPrognosis(would_claim=True, holder="")
+        if assignee.account_id == self.bot_account_id:
+            return ClaimPrognosis(would_claim=True, holder=self.bot_account_id)
         # An assignee with no accountId still holds the issue, and `holder=""`
         # is reserved for nobody holding it.
         return ClaimPrognosis(would_claim=False, holder=assignee.account_id or "unknown")
 
     def claimed(self, q: str) -> list[WorkItem]:
-        """The bot's own issues: the track query with its emptiness clause inverted.
+        """The bot's own issues: the track query with its exclusion inverted.
 
-        Routed through `query`, so this is the same single
-        `POST /rest/api/3/search/jql` a dispatch makes — a different JQL string,
-        not a different kind of request.
+        Which clause gets inverted follows the claim policy — the emptiness
+        clause under assign, the negated claim label under label. Routed
+        through `query`, so this is the same single `POST /rest/api/3/search/jql`
+        a dispatch makes. Under `claim = "none"` the bot never holds anything,
+        so the answer is an empty list, without a search that would imply
+        otherwise.
         """
+        if self.claim_policy == "none":
+            return []
+        if self.claim_policy == "label":
+            return self.query(claimed_label_jql(q, str(self.claim_label)))
         return self.query(claimed_jql(q, self.bot_account_id))
 
     def annotate(self, item: WorkItem, comment: str) -> None:
@@ -227,6 +315,32 @@ def claimed_jql(q: str, account_id: str) -> str:
         raise SourceError(
             f"jira: the track query has no empty-assignee clause to invert: {q!r}",
             fix="Add `AND assignee IS EMPTY` to the track query so dispatch skips claimed issues.",
+        )
+    return rewritten
+
+
+def claimed_label_jql(q: str, label: str) -> str:
+    """Swap the negated claim-label clause for its positive, the rest untouched.
+
+    Two shapes are recognized, case-insensitively and with or without quotes:
+    the bare `labels != "x"`, and the compound
+    `(labels IS EMPTY OR labels != "x")` in either order — the compound is the
+    correct exclusion, since JQL's `!=` does not match issues with no labels
+    at all. Both invert to `labels = "x"`.
+    """
+    quoted = f'"?{re.escape(label)}"?'
+    not_labeled = rf"labels\s*!=\s*{quoted}"
+    empty = r"labels\s+IS\s+EMPTY"
+    clause = re.compile(
+        rf"\(\s*(?:{empty}\s+OR\s+{not_labeled}|{not_labeled}\s+OR\s+{empty})\s*\)|{not_labeled}",
+        re.IGNORECASE,
+    )
+    rewritten, swapped = clause.subn(f'labels = "{label}"', q)
+    if not swapped:
+        raise SourceError(
+            f"jira: the track query has no negated claim label to invert: {q!r}",
+            fix=f'Add `AND (labels IS EMPTY OR labels != "{label}")` to the track query'
+            " so dispatch skips claimed issues.",
         )
     return rewritten
 

@@ -118,6 +118,159 @@ def test_an_empty_blocked_label_fails_fast(tmp_path: Path) -> None:
         config.load(write(tmp_path, MINIMAL + '\nblocked_label = ""\n'))
 
 
+MODEL_COMMAND = MINIMAL.replace(
+    'command = ["pi", "--prompt-file", "{prompt_file}"]',
+    'command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]',
+)
+
+
+def test_model_defaults_to_none(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").model is None
+
+
+def test_model_is_kept(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODEL_COMMAND + '\nmodel = "claude-sonnet-x"\n'))
+
+    assert cfg.track("vul").model == "claude-sonnet-x"
+
+
+def test_a_model_command_requires_model_on_every_track(tmp_path: Path) -> None:
+    """The named track is the one missing the key, not the first one."""
+    text = (
+        MODEL_COMMAND
+        + '\nmodel = "claude-sonnet-x"\n'
+        + '\n[bug]\nsource = "jira"\nquery = "project = BUGS"\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"\[bug\].*\{model\}"):
+        config.load(write(tmp_path, text))
+
+
+def test_model_without_a_model_command_fails_at_load(tmp_path: Path) -> None:
+    """The value would silently never reach the harness."""
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*\{model\}"):
+        config.load(write(tmp_path, MINIMAL + '\nmodel = "claude-sonnet-x"\n'))
+
+
+@pytest.mark.parametrize("value", ["", "two words", "tab\there", " padded"])
+def test_a_malformed_model_value_fails_at_load(tmp_path: Path, value: str) -> None:
+    """Shape only — whether the model exists is the deployment's problem."""
+    with pytest.raises(config.ConfigError, match="model"):
+        config.load(write(tmp_path, MODEL_COMMAND + f'\nmodel = "{value}"\n'))
+
+
+def test_a_model_command_on_an_unselected_harness_needs_nothing(tmp_path: Path) -> None:
+    """Only the selected harness's command binds the tracks."""
+    text = MINIMAL + '\n[harnesses.claude]\ncommand = ["claude", "{prompt_file}", "{model}"]\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").model is None
+
+
+def test_argv_template_renders_the_model(tmp_path: Path) -> None:
+    template = config.ArgvTemplate(args=["agent", "{prompt_file}", "--model", "{model}"])
+
+    rendered = template.render(tmp_path / "prompt.md", tmp_path, model="claude-sonnet-x")
+
+    assert rendered == ["agent", str(tmp_path / "prompt.md"), "--model", "claude-sonnet-x"]
+
+
+def test_claim_defaults_to_assign(tmp_path: Path) -> None:
+    """Today's behavior, unless a track opts out."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").claim == "assign"
+    assert cfg.track("vul").claim_label is None
+    assert cfg.track("vul").claim_transition is None
+
+
+def test_claim_label_and_transition_are_kept(tmp_path: Path) -> None:
+    text = MINIMAL + '\nclaim = "label"\nclaim_label = "bot-claimed"\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").claim == "label"
+    assert cfg.track("vul").claim_label == "bot-claimed"
+
+
+def test_an_unknown_claim_value_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim = "steal"\n'))
+
+
+def test_claim_label_requires_the_label_strategy(tmp_path: Path) -> None:
+    """Set but unused, the label would silently never be applied."""
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_label"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim_label = "bot-claimed"\n'))
+
+
+def test_the_label_strategy_requires_claim_label(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_label"):
+        config.load(write(tmp_path, MINIMAL + '\nclaim = "label"\n'))
+
+
+def test_claim_transition_is_kept_on_a_jira_track(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + '\nclaim_transition = "In Progress"\n'))
+
+    assert cfg.track("vul").claim_transition == "In Progress"
+
+
+def test_claim_transition_on_a_github_track_fails_fast(tmp_path: Path) -> None:
+    """GitHub Issues has no workflow to transition."""
+    text = (
+        MINIMAL.replace('source = "jira"', 'source = "github"\nrepo = "acme/api"')
+        + '\nclaim_transition = "In Progress"\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_transition"):
+        config.load(write(tmp_path, text))
+
+
+def test_claim_transition_under_claim_none_fails_fast(tmp_path: Path) -> None:
+    """No claim ever succeeds, so the transition would silently never fire."""
+    text = MINIMAL + '\nclaim = "none"\nclaim_transition = "In Progress"\n'
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_transition"):
+        config.load(write(tmp_path, text))
+
+
+def test_env_defaults_to_empty(tmp_path: Path) -> None:
+    """Tracks without the table are unaffected."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").env == {}
+
+
+def test_env_values_are_kept(tmp_path: Path) -> None:
+    text = MINIMAL + '\n[vul.env]\nTRIAGED_LABEL = "bot-triaged"\nBOT_LOGINS = "a,b"\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").env == {
+        "TRIAGED_LABEL": "bot-triaged",
+        "BOT_LOGINS": "a,b",
+    }
+
+
+@pytest.mark.parametrize("name", ["lower_case", "1LEADING_DIGIT", "_UNDERSCORE", "WITH-DASH"])
+def test_a_malformed_env_name_fails_at_load(tmp_path: Path, name: str) -> None:
+    """Uppercase alphanumerics and underscores, starting with a letter."""
+    text = MINIMAL + f'\n[vul.env]\n"{name}" = "x"\n'
+    with pytest.raises(config.ConfigError, match=rf"\[vul\].*{name}"):
+        config.load(write(tmp_path, text))
+
+
+def test_an_env_name_in_tinas_namespace_fails_at_load(tmp_path: Path) -> None:
+    """Colliding with a variable tina itself owns would change its behavior."""
+    text = MINIMAL + '\n[vul.env]\nTINA_CONTROL = "/tmp/x"\n'
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*TINA_CONTROL"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_non_string_env_value_fails_at_load(tmp_path: Path) -> None:
+    """Values are literal strings, never coerced."""
+    text = MINIMAL + "\n[vul.env]\nBOT_LIMIT = 5\n"
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*BOT_LIMIT"):
+        config.load(write(tmp_path, text))
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))
@@ -219,7 +372,7 @@ def test_a_typo_in_a_placeholder_is_not_passed_through(tmp_path: Path) -> None:
 
 def test_an_unknown_placeholder_names_what_is_supported(tmp_path: Path) -> None:
     text = MINIMAL.replace("{prompt_file}", "{workdir}")
-    with pytest.raises(config.ConfigError, match=r"\{outcome_dir\}, \{prompt_file\}"):
+    with pytest.raises(config.ConfigError, match=r"\{model\}, \{outcome_dir\}, \{prompt_file\}"):
         config.load(write(tmp_path, text))
 
 

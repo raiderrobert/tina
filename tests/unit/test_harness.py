@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -116,6 +117,49 @@ def test_default_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("TINA_HARNESS_TIMEOUT", "soon")
     assert harness.default_timeout() == harness.DEFAULT_TIMEOUT
+
+
+def test_track_env_is_merged_over_the_inherited_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The subprocess sees both; tina's own environment is never touched."""
+    monkeypatch.setenv("INHERITED_VAR", "from-parent")
+    fake = script(
+        tmp_path,
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[2], 'outcome.json').write_text(json.dumps({\n"
+        "    'outcome': 'resolved',\n"
+        "    'details': os.environ['TRACK_VAR'] + '/' + os.environ['INHERITED_VAR'],\n"
+        "}))\n",
+    )
+
+    result = harness.run(
+        config(sys.executable, str(fake), "{prompt_file}", "{outcome_dir}"),
+        "prompt",
+        tmp_path / "run",
+        env={"TRACK_VAR": "from-track"},
+    )
+
+    assert result.report.details == "from-track/from-parent"
+    assert "TRACK_VAR" not in os.environ, "merged for the subprocess only"
+
+
+def test_no_track_env_inherits_the_environment_untouched(tmp_path: Path) -> None:
+    fake = script(
+        tmp_path,
+        "import json, os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[2], 'outcome.json').write_text(json.dumps({\n"
+        "    'outcome': 'resolved', 'details': str('PATH' in os.environ),\n"
+        "}))\n",
+    )
+
+    result = harness.run(
+        config(sys.executable, str(fake), "{prompt_file}", "{outcome_dir}"),
+        "prompt",
+        tmp_path / "run",
+    )
+
+    assert result.report.details == "True"
 
 
 def test_a_bogus_artifact_url_is_a_broken_report(tmp_path: Path) -> None:

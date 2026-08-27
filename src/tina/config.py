@@ -27,7 +27,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from tina.errors import TinaError
 
@@ -35,7 +35,7 @@ SOURCES = ("jira", "github")
 EXECUTORS = ("local", "cloudrun")
 
 #: The only substitutions a harness command line may reference.
-PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir"})
+PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir", "model"})
 # Hyphens are matched so that `{prompt-file}` is reported as the typo it is,
 # rather than falling through to the vaguer "no {prompt_file}" complaint. JSON
 # and shell brace expansions do not match: they contain quotes, colons, commas.
@@ -44,6 +44,12 @@ _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 # Top-level scalars, as opposed to tables that define adapters or tracks.
 _SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control"})
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
+
+#: The namespace of environment variables tina itself owns (TINA_CONTROL,
+#: TINA_HARNESS_TIMEOUT, ...). A track shadowing one would change tina's
+#: behavior out from under the deployment, so the collision fails at load.
+RESERVED_ENV_PREFIX = "TINA_"
+_ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 class ConfigError(TinaError, ValueError):
@@ -81,9 +87,17 @@ class ArgvTemplate(BaseModel):
             )
         return self
 
-    def render(self, prompt_file: Path, outcome_dir: Path) -> list[str]:
-        """Substitute the run-specific paths. Everything else passes through."""
+    def uses(self, name: str) -> bool:
+        """Whether any argument references the named placeholder."""
+        return any(
+            match.group(1) == name for arg in self.args for match in _PLACEHOLDER.finditer(arg)
+        )
+
+    def render(self, prompt_file: Path, outcome_dir: Path, model: str | None = None) -> list[str]:
+        """Substitute the run-specific values. Everything else passes through."""
         substitutions = {"{prompt_file}": str(prompt_file), "{outcome_dir}": str(outcome_dir)}
+        if model is not None:
+            substitutions["{model}"] = model
         rendered = []
         for arg in self.args:
             for token, value in substitutions.items():
@@ -134,6 +148,11 @@ class TrackConfig(BaseModel):
     # A track is on by virtue of being present; false ships it without running
     # it. Disabled tracks are still fully validated so they cannot rot.
     enabled: bool = True
+    # The model the harness runs for this track, substituted for {model} in the
+    # command. Required exactly when the selected harness references {model} —
+    # both mismatch directions fail at load, in _validate_model. Whether the
+    # model exists in the provider stays the deployment's problem.
+    model: str | None = None
     # A declaration only: the agent produces the result with its own tools.
     result: str | None = None
     # GitHub Issues needs to know which repo the query and claims apply to.
@@ -144,6 +163,53 @@ class TrackConfig(BaseModel):
     # What a bad run leaves on the item: "leave" retries it next cycle;
     # "annotate" comments the effective status and applies `blocked_label`.
     on_failure: Literal["leave", "annotate"] = "leave"
+    # How the worker claims (ADR-014): "assign" the bot, apply `claim_label`,
+    # or "none" — no claim, dedupe is the query's job.
+    claim: Literal["assign", "none", "label"] = "assign"
+    claim_label: str | None = None
+    # A Jira transition applied after a successful claim, so the queued status
+    # stays truthful and humans can requeue by transition.
+    claim_transition: str | None = None
+    # Literal strings merged over the inherited environment for the harness
+    # subprocess only — how a track skill's scripts get configured.
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_claim_policy(self) -> TrackConfig:
+        if self.claim == "label" and not self.claim_label:
+            raise ValueError('claim = "label" requires claim_label')
+        if self.claim != "label" and self.claim_label is not None:
+            raise ValueError('claim_label only applies with claim = "label"')
+        if self.claim_transition is not None:
+            if self.source != "jira":
+                raise ValueError("claim_transition only applies to jira tracks")
+            if self.claim == "none":
+                raise ValueError(
+                    'claim_transition cannot apply under claim = "none" — nothing is ever claimed'
+                )
+        return self
+
+    @field_validator("env")
+    @classmethod
+    def _check_env_names(cls, value: dict[str, str]) -> dict[str, str]:
+        for name in value:
+            if not _ENV_NAME.fullmatch(name):
+                raise ValueError(
+                    f"env name {name!r} must be uppercase letters, digits, and"
+                    " underscores, starting with a letter"
+                )
+            if name.startswith(RESERVED_ENV_PREFIX):
+                raise ValueError(
+                    f"env name {name!r} collides with tina's own {RESERVED_ENV_PREFIX}* variables"
+                )
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def _check_model_shape(cls, value: str | None) -> str | None:
+        if value is not None and (not value or any(c.isspace() for c in value)):
+            raise ValueError("model must be non-empty and contain no whitespace")
+        return value
 
 
 class Config(BaseModel):
@@ -257,6 +323,7 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
         "config",
     )
     _validate_names(config)
+    _validate_model(config)
     return config
 
 
@@ -298,4 +365,25 @@ def _validate_names(config: Config) -> None:
         if track.source == "github" and not track.repo:
             raise ConfigError(
                 f"{config.path}: [{track.name}]: source 'github' requires repo = \"owner/name\""
+            )
+
+
+def _validate_model(config: Config) -> None:
+    """Both mismatch directions between {model} and the track key fail at load.
+
+    A command referencing {model} with no track value would run the agent with
+    the literal `{model}` as an argument; a track value under a command that
+    never references it would silently not reach the harness.
+    """
+    uses_model = config.harness_config().command.uses("model")
+    for track in config.tracks.values():
+        if uses_model and track.model is None:
+            raise ConfigError(
+                f"{config.path}: [{track.name}]: harness {config.harness!r} references"
+                " {model} but the track sets no model"
+            )
+        if not uses_model and track.model is not None:
+            raise ConfigError(
+                f"{config.path}: [{track.name}]: model is set but harness"
+                f" {config.harness!r} never references {{model}}"
             )

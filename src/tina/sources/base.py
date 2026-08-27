@@ -46,6 +46,16 @@ class Source(Protocol):
         """Fetch a single item by tracker identifier."""
         ...
 
+    def matches(self, item_id: str, q: str) -> bool:
+        """Whether the item still matches the configured query, right now.
+
+        The worker's eligibility re-check: between dispatch and worker start
+        the item can be assigned, closed, labeled, or worked by a human. The
+        whole predicate is re-checked, not existence, so every exclusion
+        mechanism counts — not just assignment. Read-only.
+        """
+        ...
+
     def claim(self, item: WorkItem) -> bool:
         """Take ownership of an item.
 

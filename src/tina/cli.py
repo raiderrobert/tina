@@ -350,7 +350,24 @@ def run_item(
     executor = executor or executors.build(config)
     run_url = executor.run_url()
 
-    if not source.claim(item):
+    # The eligibility re-check (ADR-014): between dispatch and worker start the
+    # item can be assigned, closed, labeled, or worked by a human. Before any
+    # write, for every track — under claim = "none" it is the only guard.
+    if not source.matches(item.id, track.query):
+        logger.info("no longer matches", extra={"track": track.name, "item": item.id})
+        return _record(
+            track.name,
+            item.id,
+            OutcomeReport(
+                outcome=OutcomeStatus.NO_ACTION_NEEDED,
+                details="the item no longer matches the track query",
+            ),
+            exit_code=None,
+            started=started,
+            run_url=run_url,
+        )
+
+    if track.claim != "none" and not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
         return _record(
             track.name,
@@ -368,7 +385,7 @@ def run_item(
     with tempfile.TemporaryDirectory(prefix="tina-") as tmp:
         workdir = Path(tmp)
         text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
-        result = harness.run(harness_config, text, workdir)
+        result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
 
     report = verify.verify(result.report)
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)
@@ -393,16 +410,32 @@ def _preview_run(
     on `message` can never count a preview as a run. The `dry_run` marker is
     added only here, so a normal run carries no such key at all.
     """
-    prognosis = source.claim_prognosis(item)
-    fields: dict[str, Any] = {
-        "dry_run": True,
-        "track": track.name,
-        "item": item.id,
-        "would_claim": prognosis.would_claim,
-        "holder": prognosis.holder,
-    }
-
+    fields: dict[str, Any] = {"dry_run": True, "track": track.name, "item": item.id}
     output.dry_run_header("nothing will be claimed and no agent will run")
+
+    fields["matches"] = source.matches(item.id, track.query)
+    if not fields["matches"]:
+        output.would(
+            f"Would not run {item.id} — it no longer matches the track query;"
+            f" the run would exit {OutcomeStatus.NO_ACTION_NEEDED}"
+        )
+        fields["effective_status"] = OutcomeStatus.NO_ACTION_NEEDED
+        output.dry_run_footer(action=f"exit {OutcomeStatus.NO_ACTION_NEEDED} without claiming")
+        fields["duration_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("would run", extra=fields)
+        return
+
+    if track.claim == "none":
+        # No claim and no prognosis to preview — the query is the dedupe.
+        output.would('Would skip the claim — claim = "none"; dedupe is the query\'s job')
+        fields |= _preview_prompt(config, track, item)
+        output.dry_run_footer(action=f"run the agent on {item.id}")
+        fields["duration_seconds"] = round(time.monotonic() - started, 3)
+        logger.info("would run", extra=fields)
+        return
+
+    prognosis = source.claim_prognosis(item)
+    fields |= {"would_claim": prognosis.would_claim, "holder": prognosis.holder}
     if prognosis.would_claim:
         held = f"held by {prognosis.holder}" if prognosis.holder else "unassigned"
         output.would(f"Would claim {item.id} — {held}")
@@ -432,7 +465,7 @@ def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[
     workdir = Path(tempfile.mkdtemp(prefix="tina-"))
     text = prompt.build(config.track_dir(track), item, harness.outcome_path(workdir))
     prompt_file = harness.write_prompt(text, workdir)
-    command = harness_config.command.render(prompt_file, workdir)
+    command = harness_config.command.render(prompt_file, workdir, model=track.model)
 
     output.would(f"Prompt assembled: {prompt_file} ({len(text)} chars)")
     output.would(f"Would run: {shlex.join(command)}")

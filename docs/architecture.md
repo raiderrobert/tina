@@ -208,8 +208,20 @@ query. All judgment about what the item actually is happens inside the track.
 |---|---|---|
 | `query()` | dispatcher | run the configured query, return work items |
 | `claimed(q)` | `status` | the same query with its unclaimed clause inverted: what workers hold now |
+| `matches(item_id, q)` | worker | re-check the whole query against one item at worker start |
 | `claim(item)` | worker | mark the item as taken; fail if already claimed |
 | `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
+
+`matches` is the eligibility re-check: between dispatch and worker start an
+item can be assigned, closed, labeled, or worked by a human, and only the
+claim would notice — and only the assignee case. The worker re-checks the
+full track query scoped to the one item, before claiming, and exits
+`no_action_needed` when it no longer matches. Re-checking the whole
+predicate rather than existence is the point: it works for every exclusion
+mechanism, and under `claim = "none"` it is the only guard. Jira evaluates
+it as one search (`(query) AND key = <item>`, ORDER BY stripped); GitHub
+search has no number qualifier, so the adapter fetches the issue and
+re-checks the structured qualifiers in code.
 
 v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
 implementation makes the interface accidentally Jira-shaped, and an OSS project
@@ -226,6 +238,15 @@ state file, restartable containers, multiple invokers safe by default.
 **The worker claims, not the dispatcher.** Claiming assigns the ticket to the bot
 user or applies a label, and the configured query excludes claimed items — which
 is what `unassigned = TRUE` is already doing in the work implementation.
+
+The claim strategy is per track ([ADR-014](adr/014-claim-policy-per-track.md)):
+`claim = "assign"` (default) assigns the bot, idempotently — an item the bot
+already holds re-claims rather than deadlocking. `claim = "label"` applies
+`claim_label` instead, for deployments whose tokens cannot assign; the query
+must exclude the label, and `claimed()`/`status` invert that negated label
+token rather than the assignee clause. `claim = "none"` skips claiming
+entirely — dedupe is the query's job. On Jira, `claim_transition` names a
+status transition applied after a successful claim.
 
 This is a choice between failure modes:
 
@@ -292,6 +313,13 @@ command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
 Singular `harness` selects; plural `[harnesses.<name>]` defines. TOML will not let
 one key be both a string and a table, so the two cannot share a name. `executor`
 and `[executors.<name>]` work the same way.
+
+The command may reference three placeholders: `{prompt_file}`, `{outcome_dir}`,
+and `{model}`. A command referencing `{model}` requires every track to set
+`model` — small fast models for triage tracks, frontier ones for code-change
+tracks — and a track setting `model` under a command that never references it
+is equally a config-load error, because the value would silently not reach the
+harness.
 
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
@@ -378,6 +406,14 @@ result = "github:issue-comment"
 
 Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name. Unknown keys are rejected rather than ignored.
+
+A track may carry an optional `[<track>.env]` table: literal strings merged
+over the inherited environment for the harness subprocess only. Track skills
+ship scripts, and those scripts read configuration from the environment —
+marker label names, bot identities, feature switches. Names are validated at
+load (uppercase letters, digits, and underscores, starting with a letter),
+and the `TINA_*` namespace is reserved. The values stay literals: a catalog
+of runner-provided values is a consumer concern.
 
 The work implementation this is derived from used a Jira-bound schema:
 
