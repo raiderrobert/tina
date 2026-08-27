@@ -46,6 +46,29 @@ def test_explicit_values_and_track_dir_resolves_against_config(tmp_path: Path) -
     assert cfg.track("vul").result == "github:pr"
 
 
+def test_control_defaults_to_none(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.control is None
+    assert cfg.control_path() is None
+
+
+def test_a_relative_control_path_resolves_against_the_config_file(tmp_path: Path) -> None:
+    text = MINIMAL.replace('harness = "pi"', 'harness = "pi"\ncontrol = "control.toml"', 1)
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.control_path() == tmp_path / "control.toml"
+
+
+def test_an_absolute_control_path_is_kept(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'harness = "pi"', 'harness = "pi"\ncontrol = "/mnt/config/control.toml"', 1
+    )
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.control_path() == Path("/mnt/config/control.toml")
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))

@@ -43,5 +43,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GITHUB_BOT_LOGIN",
         "GITHUB_API_URL",
         "TINA_HARNESS_TIMEOUT",
+        "TINA_CONTROL",
+        "TINA_CONTROL_INLINE",
     ):
         monkeypatch.delenv(name, raising=False)
