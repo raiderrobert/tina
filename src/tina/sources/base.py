@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from tina.errors import TinaError
+from tina.log import get_logger
 from tina.models import WorkItem
+
+log = get_logger(__name__)
 
 
 class ClaimPrognosis(BaseModel):
@@ -103,6 +108,81 @@ class Source(Protocol):
 
 class SourceError(TinaError, RuntimeError):
     """A source adapter could not talk to its tracker."""
+
+
+@dataclass(frozen=True)
+class RetryRule:
+    """One transient-failure shape, and the waits between re-issues.
+
+    `waits` is the ladder: one retry per entry, so its length bounds the
+    attempts. `marker` narrows the match to responses whose body carries the
+    text — how a documented rate-limit message is told apart from an ordinary
+    refusal with the same status. `retry_after` honors a numeric Retry-After
+    header, with the ladder entry as the ceiling, so the server cannot demand
+    an arbitrary sleep.
+    """
+
+    status: frozenset[int]
+    waits: tuple[float, ...]
+    marker: str = ""
+    retry_after: bool = False
+
+    def matches(self, response: httpx.Response) -> bool:
+        if response.status_code not in self.status:
+            return False
+        return not self.marker or self.marker in response.text
+
+    def wait(self, response: httpx.Response, attempt: int) -> float:
+        wait = self.waits[attempt]
+        if self.retry_after:
+            header = response.headers.get("Retry-After", "")
+            if header.isdigit():
+                wait = min(float(header), wait)
+        return wait
+
+
+def send_with_retry(
+    send: Callable[[], httpx.Response],
+    rules: Sequence[RetryRule],
+    sleep: Callable[[float], None],
+    source: str,
+    request: str,
+) -> httpx.Response:
+    """Issue a request, re-issuing transient failures per the rules.
+
+    Transient tracker failures are intermittent and look like an empty
+    backlog, which is the wrong thing to be ambiguous about. Each rule's
+    ladder is spent independently; once no rule has a wait left, the response
+    is returned as-is — the caller owns the error path, so a permanent
+    failure still raises there with the original message.
+    """
+    spent = [0] * len(rules)
+    while True:
+        response = send()
+        if response.status_code < 400:
+            return response
+        index = next(
+            (
+                i
+                for i, rule in enumerate(rules)
+                if spent[i] < len(rule.waits) and rule.matches(response)
+            ),
+            None,
+        )
+        if index is None:
+            return response
+        wait = rules[index].wait(response, spent[index])
+        spent[index] += 1
+        log.warning(
+            "transient failure; retrying",
+            extra={
+                "source": source,
+                "request": request,
+                "status": response.status_code,
+                "wait_seconds": wait,
+            },
+        )
+        sleep(wait)
 
 
 def require_env(name: str, source: str) -> str:

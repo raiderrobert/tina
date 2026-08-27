@@ -173,3 +173,74 @@ def test_cloudrun_run_url_is_none_outside_a_job() -> None:
     executor = CloudRunExecutor(CloudRunOptions(project="p", region="r", job="j"))
 
     assert executor.run_url() is None
+
+
+# --- run_job retry: the Admin API sheds load with 503 UNAVAILABLE -------------
+
+
+class Unavailable(Exception):
+    """The shape of google.api_core.exceptions.ServiceUnavailable that matters."""
+
+    code = 503
+
+
+class SheddingJobsClient(FakeJobsClient):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    def run_job(self, request: Any) -> None:
+        super().run_job(request)
+        if len(self.requests) <= self.failures:
+            raise Unavailable("503 UNAVAILABLE")
+
+
+def shedding_executor(failures: int) -> tuple[CloudRunExecutor, list[float]]:
+    waits: list[float] = []
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        client=SheddingJobsClient(failures),
+        sleep=waits.append,
+    )
+    return executor, waits
+
+
+def test_run_job_is_retried_while_the_api_sheds_load() -> None:
+    executor, waits = shedding_executor(failures=2)
+
+    executor.enqueue("vul", "VUL-1")
+
+    assert waits == [2.0, 8.0]
+    assert len(executor.client.requests) == 3
+
+
+def test_a_persistently_unavailable_api_raises_after_the_ladder() -> None:
+    executor, waits = shedding_executor(failures=10)
+
+    with pytest.raises(Unavailable):
+        executor.enqueue("vul", "VUL-1")
+
+    assert waits == [2.0, 8.0, 20.0]
+    assert len(executor.client.requests) == 4
+
+
+def test_other_run_job_errors_are_never_retried() -> None:
+    class Denied(Exception):
+        code = 403
+
+    class DenyingJobsClient(FakeJobsClient):
+        def run_job(self, request: Any) -> None:
+            super().run_job(request)
+            raise Denied("permission denied")
+
+    waits: list[float] = []
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="j"),
+        client=DenyingJobsClient(),
+        sleep=waits.append,
+    )
+
+    with pytest.raises(Denied):
+        executor.enqueue("vul", "VUL-1")
+
+    assert waits == []

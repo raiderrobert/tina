@@ -6,6 +6,8 @@ Requires the optional dependency: `pip install tina-cli[cloudrun]`.
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,10 @@ log = get_logger(__name__)
 
 #: Cloud Run injects the execution name into every job task's environment.
 EXECUTION_ENV = "CLOUD_RUN_EXECUTION"
+
+#: The Admin API sheds load with 503 UNAVAILABLE. One wait per retry, then the
+#: error stands. Every other failure is permanent and raises immediately.
+RUN_JOB_WAITS = (2.0, 8.0, 20.0)
 
 INSTALL_HINT = (
     "install tina with the extra: `uv add 'tina-cli[cloudrun]'` or "
@@ -34,12 +40,14 @@ class CloudRunExecutor:
         options: CloudRunOptions,
         config_path: Path | str = "tina.toml",
         client: Any = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         # Required keys are enforced by CloudRunOptions at config load, so a
         # misconfigured job fails before the first query runs, not after.
         self.options = options
         self.config_path = str(config_path)
         self._client = client
+        self._sleep = sleep
 
     @property
     def client(self) -> Any:
@@ -63,11 +71,27 @@ class CloudRunExecutor:
                 container_overrides=[run_v2.RunJobRequest.Overrides.ContainerOverride(args=args)]
             ),
         )
-        self.client.run_job(request=request)
+        self._run_job(request)
         log.info(
             "worker enqueued",
             extra={"track": track, "item": item_id or "", "job": self.job_path},
         )
+
+    def _run_job(self, request: Any) -> None:
+        """Create the execution, retrying while the Admin API sheds load."""
+        for wait in RUN_JOB_WAITS:
+            try:
+                self.client.run_job(request=request)
+                return
+            except Exception as exc:
+                if not _is_unavailable(exc):
+                    raise
+                log.warning(
+                    "cloud run unavailable; retrying",
+                    extra={"job": self.job_path, "wait_seconds": wait},
+                )
+                self._sleep(wait)
+        self.client.run_job(request=request)
 
     def run_url(self) -> str | None:
         """Console URL of the execution this worker is running inside.
@@ -84,6 +108,12 @@ class CloudRunExecutor:
             "https://console.cloud.google.com/run/jobs/executions/details/"
             f"{self.options.region}/{execution}/logs?project={self.options.project}"
         )
+
+
+def _is_unavailable(exc: Exception) -> bool:
+    """503 UNAVAILABLE, matched on the google exception's own status attribute
+    so the check needs nothing imported from the optional extra."""
+    return getattr(exc, "code", None) == 503
 
 
 def _run_v2() -> Any:

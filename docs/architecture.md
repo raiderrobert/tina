@@ -240,6 +240,17 @@ it as one search (`(query) AND key = <item>`, ORDER BY stripped); GitHub
 search has no number qualifier, so the adapter fetches the issue and
 re-checks the structured qualifiers in code.
 
+Transient tracker failures are retried inside the adapters' request layer
+rather than surfaced, because the failure is intermittent and looks like an
+empty backlog — the wrong thing to be ambiguous about. Each adapter declares a
+few retry rules: a status match, an optional body marker, and a ladder of
+waits. GitHub retries its secondary rate limit — a 403 carrying the documented
+marker — once after the documented minimum wait (60s), and 502/503/504 on a
+short ladder (2s, then 8s). Jira retries server errors on the same short
+ladder, and a 429 once, honoring a numeric `Retry-After` up to the minute the
+ladder allows. No other 4xx is ever retried, and a failure that outlives its
+ladder raises with the original status and message.
+
 v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
 implementation makes the interface accidentally Jira-shaped, and an OSS project
 that cannot be tried without a Jira instance will not get used. GitHub Issues is
@@ -297,6 +308,10 @@ The executor is how the dispatcher enqueues workers.
 v1 ships both. `local` is not optional — it is how anyone tries Tina. A single
 executor would make the interface accidentally Cloud Run-shaped. k8s Jobs, ECS,
 and others come later.
+
+The Cloud Run Admin API sheds load with 503 UNAVAILABLE, so `cloudrun` retries
+`run_job` on a 2s, 8s, 20s ladder — the executor-side counterpart of the source
+adapters' transient retry (§8). Any other failure raises immediately.
 
 ---
 
