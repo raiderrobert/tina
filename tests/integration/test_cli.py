@@ -68,6 +68,8 @@ class FakeSource:
         self.holder = holder
         self.held = list(held or [])
         self.claims: list[str] = []
+        self.annotations: list[tuple[str, str]] = []
+        self.blocked: list[str] = []
 
     def query(self, q: str) -> list[WorkItem]:
         self.queried = q
@@ -87,6 +89,12 @@ class FakeSource:
         self.claimed_query = q
         return list(self.held)
 
+    def annotate(self, item: WorkItem, comment: str) -> None:
+        self.annotations.append((item.id, comment))
+
+    def block(self, item: WorkItem) -> None:
+        self.blocked.append(item.id)
+
 
 class NoClaimSource(FakeSource):
     """A tracker that fails the test if the claim it must not make is made.
@@ -101,9 +109,13 @@ class NoClaimSource(FakeSource):
 class FakeExecutor:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str]] = []
+        self.url: str | None = None
 
     def enqueue(self, track: str, item_id: str) -> None:
         self.enqueued.append((track, item_id))
+
+    def run_url(self) -> str | None:
+        return self.url
 
 
 @pytest.fixture
@@ -340,6 +352,60 @@ def test_reports_an_unknown_track(project: Path) -> None:
 
     assert result.exit_code == 1
     assert "no track named 'bug'" in last_record(result.output)["message"]
+
+
+# --- disabled tracks: refuse loudly, never silently no-op --------------------
+
+
+@pytest.fixture
+def disabled(project: Path) -> Path:
+    """The project config with its one track switched off."""
+    project.write_text(project.read_text() + "\nenabled = false\n")
+    return project
+
+
+def test_dispatch_refuses_a_disabled_track(disabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A silent no-op would look identical to an empty backlog."""
+    source, executor = NoQuerySource(items("VUL-1")), FakeExecutor()
+    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(disabled)])
+
+    assert result.exit_code == 1
+    assert executor.enqueued == []
+    message = last_record(result.stdout)["message"]
+    assert "'vul'" in message
+    assert "disabled" in message
+    assert "enabled = true" in plain(result.stderr)
+
+
+def test_run_refuses_a_disabled_track(disabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = wire(monkeypatch, NoClaimSource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(disabled)]
+    )
+
+    assert result.exit_code == 1
+    assert source.claims == []
+    message = last_record(result.stdout)["message"]
+    assert "'vul'" in message
+    assert "disabled" in message
+
+
+def test_a_dry_run_of_a_disabled_track_also_refuses(
+    disabled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preview of a track that cannot run would only mislead."""
+    wire(monkeypatch, NoQuerySource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(disabled), "--dry-run"]
+    )
+
+    assert result.exit_code == 1
+    assert "disabled" in last_record(result.stdout)["message"]
 
 
 # --- both halves of the stdout/stderr boundary ------------------------------
@@ -620,6 +686,206 @@ def test_a_lost_claim_exits_no_action_needed(project: Path, records: io.StringIO
     assert record.effective_status is OutcomeStatus.NO_ACTION_NEEDED
     assert record.exit_code is None, "the harness never ran"
     assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+
+
+# --- on_failure: a bad run leaves a trace and stops matching -----------------
+
+RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]
+
+
+@pytest.fixture
+def annotating(project: Path) -> Path:
+    """The project config with lifecycle write-back switched on."""
+    project.write_text(project.read_text() + '\non_failure = "annotate"\n')
+    return project
+
+
+def test_a_failed_run_is_annotated_and_blocked(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    source, executor = wired
+    executor.url = "https://logs.example/run/1"
+    outcome_written(annotating, {"outcome": "failed", "details": "no credentials for the repo"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+
+    assert result.exit_code == 0
+    (annotated_item, comment), *rest = source.annotations
+    assert rest == []
+    assert annotated_item == "VUL-1"
+    assert "failed" in comment
+    assert "no credentials for the repo" in comment
+    assert "https://logs.example/run/1" in comment
+    assert source.blocked == ["VUL-1"]
+
+
+def test_a_needs_human_run_is_annotated_and_blocked(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The agent correctly concluded a person must decide; a person has to find out."""
+    source, _ = wired
+    outcome_written(annotating, {"outcome": "needs_human", "details": "two plausible fixes"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+
+    assert result.exit_code == 0
+    assert [item for item, _ in source.annotations] == ["VUL-1"]
+    assert "needs_human" in source.annotations[0][1]
+    assert source.blocked == ["VUL-1"]
+
+
+def test_a_lying_resolved_run_is_annotated_and_blocked(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The track-that-lies case: verification failure flows through effective status."""
+    source, _ = wired
+    outcome_written(
+        annotating,
+        {
+            "outcome": "resolved",
+            "details": "opened a PR",
+            "artifacts": [{"kind": "github:pr", "url": MISSING_ARTIFACT}],
+        },
+    )
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert record["report"]["outcome"] == "resolved", "the agent's report is preserved"
+    assert record["effective_status"] == OutcomeStatus.NEEDS_HUMAN
+    comment = source.annotations[0][1]
+    assert "needs_human" in comment
+    assert "verification failed" in comment
+    assert source.blocked == ["VUL-1"]
+
+
+def test_clean_outcomes_write_nothing(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Verified resolved and no_action_needed leave the item untouched."""
+    source, _ = wired
+    outcome_written(
+        annotating,
+        {
+            "outcome": "resolved",
+            "details": "opened a PR",
+            "artifacts": [{"kind": "github:pr", "url": GOOD_ARTIFACT}],
+        },
+    )
+    assert runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)]).exit_code == 0
+
+    outcome_written(annotating, {"outcome": "no_action_needed", "details": "already fixed"})
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+
+    assert result.exit_code == 0
+    assert source.annotations == []
+    assert source.blocked == []
+
+
+def test_a_lost_claim_writes_nothing(annotating: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another worker holds the item; nothing failed and nothing is blocked."""
+    source = wire(monkeypatch, FakeSource(items("VUL-1"), claimable=False))
+    monkeypatch.setattr(executors, "build", lambda config: FakeExecutor())
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+
+    assert result.exit_code == 0
+    assert source.annotations == []
+    assert source.blocked == []
+
+
+def test_leave_is_the_default_and_writes_nothing(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Today's behavior is preserved unless a track opts in."""
+    source, _ = wired
+    outcome_written(project, {"outcome": "failed", "details": "poison pill"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["effective_status"] == OutcomeStatus.FAILED
+    assert source.annotations == []
+    assert source.blocked == []
+
+
+def test_the_comment_omits_the_link_when_the_executor_cannot_tell(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """No link line at all — never "logs unavailable"."""
+    source, _ = wired
+    outcome_written(annotating, {"outcome": "failed", "details": "boom"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+    comment = source.annotations[0][1]
+
+    assert result.exit_code == 0
+    assert "Run logs" not in comment
+    assert "unavailable" not in comment
+
+
+def test_write_back_happens_after_the_record_is_logged(
+    annotating: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """An annotate/block problem can never change the recorded outcome."""
+    source, _ = wired
+    outcome_written(annotating, {"outcome": "failed", "details": "boom"})
+
+    result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(annotating)])
+    messages = [line["message"] for line in json_lines(result.stdout)]
+
+    assert result.exit_code == 0
+    assert "run complete" in messages
+    assert last_record(result.stdout)["effective_status"] == OutcomeStatus.FAILED
+    assert source.annotations, "the write-back still happened"
+
+
+# --- run_url: the executor's deep link, on every record ----------------------
+
+
+def test_the_run_record_carries_the_executors_run_url(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """Present for every outcome, not only failures."""
+    _, executor = wired
+    executor.url = "https://logs.example/run/1"
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["run_url"] == "https://logs.example/run/1"
+
+
+def test_run_url_is_null_when_the_executor_cannot_tell(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["run_url"] is None
+
+
+def test_a_lost_claim_record_still_carries_the_run_url(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1"), claimable=False))
+    executor = FakeExecutor()
+    executor.url = "https://logs.example/run/2"
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project)]
+    )
+    record = last_record(result.stdout)
+
+    assert result.exit_code == 0
+    assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
+    assert record["run_url"] == "https://logs.example/run/2"
 
 
 # --- dry run: everything a run does except the parts that change something ---

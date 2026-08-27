@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 import httpx
@@ -28,11 +30,12 @@ def issue(number: int = 42, assignees: list[str] | None = None) -> dict[str, Any
     }
 
 
-def source(handler, bot_login: str | None = BOT) -> GitHubSource:
+def source(handler, bot_login: str | None = BOT, **kwargs: Any) -> GitHubSource:
     return GitHubSource(
         repo=REPO,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
         bot_login=bot_login,
+        **kwargs,
     )
 
 
@@ -225,3 +228,89 @@ def test_a_query_with_no_no_assignee_qualifier_is_a_source_error() -> None:
             source(handler).claimed(q)
         assert q in str(caught.value)
         assert NO_ASSIGNEE in caught.value.fix
+
+
+# --- lifecycle write-back: annotate and block (ADR-013) ----------------------
+
+
+def test_annotate_posts_an_issue_comment(item: WorkItem) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={})
+
+    source(handler).annotate(item, "run ended failed\n\nRun logs: https://logs.example/1")
+
+    assert (seen["method"], seen["path"]) == ("POST", f"/repos/{REPO}/issues/42/comments")
+    assert seen["body"] == {"body": "run ended failed\n\nRun logs: https://logs.example/1"}
+
+
+def test_annotate_failure_is_logged_and_swallowed(
+    item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reporting hiccup must not mask the failure it reports."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    with caplog.at_level(logging.WARNING):
+        source(handler).annotate(item, "run ended failed")
+
+    assert any("annotate failed" in record.message for record in caplog.records)
+
+
+def test_block_adds_the_exclusion_label(item: WorkItem) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=[{"name": "tina-blocked"}])
+
+    source(handler).block(item)
+
+    assert (seen["method"], seen["path"]) == ("POST", f"/repos/{REPO}/issues/42/labels")
+    assert seen["body"] == {"labels": ["tina-blocked"]}
+
+
+def test_the_exclusion_label_is_overridable(item: WorkItem) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=[])
+
+    source(handler, blocked_label="factory-hold").block(item)
+
+    assert seen["body"] == {"labels": ["factory-hold"]}
+
+
+def test_block_is_idempotent(item: WorkItem) -> None:
+    """GitHub's label add returns the full set: adding an existing label is a no-op."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=[{"name": "tina-blocked"}])
+
+    github = source(handler)
+    github.block(item)
+    github.block(item)
+
+    assert calls == ["POST", "POST"], "the same write twice, and no error either time"
+
+
+def test_block_failure_is_logged_and_swallowed(
+    item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="no permission")
+
+    with caplog.at_level(logging.WARNING):
+        source(handler).block(item)
+
+    assert any("block failed" in record.message for record in caplog.records)

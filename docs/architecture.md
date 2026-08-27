@@ -403,6 +403,24 @@ a path Tina reads, never an object Tina fetches — in
 [ADR-012](adr/012-control-file-is-a-path.md). Per-platform mount recipes are
 in [control.md](control.md).
 
+### Lifecycle write-back
+
+A bad run must leave a trace on the work item, or the next dispatch matches
+the same item forever — a poison pill retried every cycle looks like normal
+activity in the logs. Per track, `on_failure` decides:
+
+- `"leave"` (default) — the item is untouched and retried next cycle.
+- `"annotate"` — the worker comments the effective status, the agent's
+  details, and the executor's log link on the item, then applies the source's
+  exclusion marker — a label, `tina-blocked` unless the track sets
+  `blocked_label` — so the configured query stops matching it.
+
+It triggers on *effective* status: `failed`, `needs_human`, and `resolved`
+that failed verification. Clean outcomes write nothing. The track query has to
+exclude the marker itself; Tina never rewrites queries. Writing about the run
+is lifecycle, the same category as claiming, not a result — the line is drawn
+in [ADR-013](adr/013-lifecycle-write-back-is-not-result-writing.md).
+
 ---
 
 ## 16. Track anatomy

@@ -77,3 +77,32 @@ def test_build_rejects_an_unknown_executor(tmp_path: Path) -> None:
 
     with pytest.raises(ExecutorError, match="nomad"):
         executors.build(config)
+
+
+# --- run_url: a deep link to the worker's own logs ---------------------------
+
+
+def test_local_run_url_is_none() -> None:
+    """There is no log console; inventing a file path would be worse."""
+    assert LocalExecutor(config_path=Path("tina.toml")).run_url() is None
+
+
+def test_cloudrun_run_url_is_built_from_the_worker_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLOUD_RUN_EXECUTION", "tina-worker-abc12")
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="acme-prod", region="us-central1", job="tina-worker")
+    )
+
+    assert executor.run_url() == (
+        "https://console.cloud.google.com/run/jobs/executions/details/"
+        "us-central1/tina-worker-abc12/logs?project=acme-prod"
+    )
+
+
+def test_cloudrun_run_url_is_none_outside_a_job() -> None:
+    """No execution name, no URL — never a link that 404s. clean_env holds here."""
+    executor = CloudRunExecutor(CloudRunOptions(project="p", region="r", job="j"))
+
+    assert executor.run_url() is None

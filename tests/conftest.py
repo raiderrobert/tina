@@ -45,5 +45,6 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TINA_HARNESS_TIMEOUT",
         "TINA_CONTROL",
         "TINA_CONTROL_INLINE",
+        "CLOUD_RUN_EXECUTION",
     ):
         monkeypatch.delenv(name, raising=False)

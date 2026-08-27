@@ -14,8 +14,11 @@ from typing import Any
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
+from tina.log import get_logger
 from tina.models import WorkItem
 from tina.sources.base import ClaimPrognosis, SourceError, parse_payload, require_env
+
+log = get_logger(__name__)
 
 API_BASE = "https://api.github.com"
 SEARCH_PATH = "/search/issues"
@@ -82,10 +85,12 @@ class GitHubSource:
         client: httpx.Client | None = None,
         bot_login: str | None = None,
         api_base: str | None = None,
+        blocked_label: str = "tina-blocked",
     ) -> None:
         if not repo:
             raise SourceError('github source requires repo = "owner/name" on the track')
         self.repo = repo
+        self.blocked_label = blocked_label
         self.api_base = (api_base or os.environ.get("GITHUB_API_URL") or API_BASE).rstrip("/")
         self._bot_login = bot_login or os.environ.get("GITHUB_BOT_LOGIN")
         if client is None:
@@ -146,6 +151,37 @@ class GitHubSource:
         a dispatch makes. `bot_login` may cost a `GET /user`; still no write.
         """
         return self.query(claimed_search(q, self.bot_login))
+
+    def annotate(self, item: WorkItem, comment: str) -> None:
+        """Comment on the issue. Best-effort per the contract: log, never raise."""
+        try:
+            self._request(
+                "POST",
+                f"/repos/{self.repo}/issues/{_number(item.id)}/comments",
+                json={"body": comment},
+            )
+        except SourceError as exc:
+            log.warning("annotate failed", extra={"item": item.id, "error": str(exc)})
+            return
+        log.info("item annotated", extra={"item": item.id})
+
+    def block(self, item: WorkItem) -> None:
+        """Add the exclusion label, `tina-blocked` unless the track overrides it.
+
+        GitHub's label add returns the issue's full label set, so adding one
+        it already carries is a no-op rather than an error. Best-effort, like
+        `annotate`.
+        """
+        try:
+            self._request(
+                "POST",
+                f"/repos/{self.repo}/issues/{_number(item.id)}/labels",
+                json={"labels": [self.blocked_label]},
+            )
+        except SourceError as exc:
+            log.warning("block failed", extra={"item": item.id, "error": str(exc)})
+            return
+        log.info("item blocked", extra={"item": item.id, "label": self.blocked_label})
 
     def _issue(self, number: str) -> Issue:
         path = f"/repos/{self.repo}/issues/{number}"

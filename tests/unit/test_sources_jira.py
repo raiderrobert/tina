@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -255,3 +256,93 @@ def test_a_query_with_no_empty_assignee_clause_is_a_source_error() -> None:
             source(handler).claimed(jql)
         assert jql in str(caught.value)
         assert "assignee IS EMPTY" in caught.value.fix
+
+
+# --- lifecycle write-back: annotate and block (ADR-013) ----------------------
+
+
+def test_annotate_posts_the_comment_as_adf(work_item: WorkItem) -> None:
+    """One paragraph per line, in the same document shape `render_adf` reads."""
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={})
+
+    source(handler).annotate(work_item, "run ended failed\n\nRun logs: https://logs.example/1")
+
+    assert (seen["method"], seen["path"]) == ("POST", "/rest/api/3/issue/VUL-1/comment")
+    document = seen["body"]["body"]
+    assert document["type"] == "doc"
+    texts = [node["content"][0]["text"] for node in document["content"] if node.get("content")]
+    assert texts == ["run ended failed", "Run logs: https://logs.example/1"]
+
+
+def test_annotate_failure_is_logged_and_swallowed(
+    work_item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reporting hiccup must not mask the failure it reports."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    with caplog.at_level(logging.WARNING):
+        source(handler).annotate(work_item, "run ended failed")
+
+    assert any("annotate failed" in record.message for record in caplog.records)
+
+
+def test_block_adds_the_exclusion_label(work_item: WorkItem) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    source(handler).block(work_item)
+
+    assert (seen["method"], seen["path"]) == ("PUT", "/rest/api/3/issue/VUL-1")
+    assert seen["body"] == {"update": {"labels": [{"add": "tina-blocked"}]}}
+
+
+def test_the_exclusion_label_is_overridable(work_item: WorkItem) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    source(handler, blocked_label="factory-hold").block(work_item)
+
+    assert seen["body"] == {"update": {"labels": [{"add": "factory-hold"}]}}
+
+
+def test_block_is_idempotent(work_item: WorkItem) -> None:
+    """Jira's label add is a set add: blocking an already-blocked issue is a no-op."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(204)
+
+    jira = source(handler)
+    jira.block(work_item)
+    jira.block(work_item)
+
+    assert calls == ["PUT", "PUT"], "the same write twice, and no error either time"
+
+
+def test_block_failure_is_logged_and_swallowed(
+    work_item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="no permission")
+
+    with caplog.at_level(logging.WARNING):
+        source(handler).block(work_item)
+
+    assert any("block failed" in record.message for record in caplog.records)

@@ -69,6 +69,55 @@ def test_an_absolute_control_path_is_kept(tmp_path: Path) -> None:
     assert cfg.control_path() == Path("/mnt/config/control.toml")
 
 
+def test_enabled_defaults_to_true(tmp_path: Path) -> None:
+    """A track is on by virtue of being present."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").enabled is True
+
+
+def test_enabled_false_is_kept(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + "\nenabled = false\n"))
+
+    assert cfg.track("vul").enabled is False
+
+
+def test_a_disabled_track_is_still_fully_validated(tmp_path: Path) -> None:
+    """Disabling a track must not let it rot: unknown keys still fail fast."""
+    with pytest.raises(config.ConfigError, match="jql"):
+        config.load(write(tmp_path, MINIMAL + '\nenabled = false\njql = "project = VUL"\n'))
+
+
+def test_a_disabled_github_track_still_requires_repo(tmp_path: Path) -> None:
+    text = MINIMAL.replace('source = "jira"', 'source = "github"') + "\nenabled = false\n"
+    with pytest.raises(config.ConfigError, match="requires repo"):
+        config.load(write(tmp_path, text))
+
+
+def test_on_failure_defaults_to_leave(tmp_path: Path) -> None:
+    """The conservative choice: annotating writes to the tracker unasked."""
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").on_failure == "leave"
+    assert cfg.track("vul").blocked_label == "tina-blocked"
+
+
+def test_on_failure_annotate_is_kept(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + '\non_failure = "annotate"\n'))
+
+    assert cfg.track("vul").on_failure == "annotate"
+
+
+def test_an_unknown_on_failure_value_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="on_failure"):
+        config.load(write(tmp_path, MINIMAL + '\non_failure = "retry"\n'))
+
+
+def test_an_empty_blocked_label_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="blocked_label"):
+        config.load(write(tmp_path, MINIMAL + '\nblocked_label = ""\n'))
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))

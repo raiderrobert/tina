@@ -5,6 +5,7 @@ Requires the optional dependency: `pip install tina-cli[cloudrun]`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ from tina.executors.base import ExecutorError
 from tina.log import get_logger
 
 log = get_logger(__name__)
+
+#: Cloud Run injects the execution name into every job task's environment.
+EXECUTION_ENV = "CLOUD_RUN_EXECUTION"
 
 INSTALL_HINT = (
     "install tina with the extra: `uv add 'tina-cli[cloudrun]'` or "
@@ -68,6 +72,22 @@ class CloudRunExecutor:
         log.info(
             "worker enqueued",
             extra={"track": track, "item": item_id, "job": self.job_path},
+        )
+
+    def run_url(self) -> str | None:
+        """Console URL of the execution this worker is running inside.
+
+        The execution name comes from the environment; project and region
+        from the options. Outside a job there is no execution, so None —
+        never a URL that 404s. Needs no client and no SDK, which is what
+        lets `tina run` build this executor just to ask one question.
+        """
+        execution = os.environ.get(EXECUTION_ENV)
+        if not execution:
+            return None
+        return (
+            "https://console.cloud.google.com/run/jobs/executions/details/"
+            f"{self.options.region}/{execution}/logs?project={self.options.project}"
         )
 
 

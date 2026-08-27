@@ -15,7 +15,7 @@ __all__ = ["Source", "JiraSource", "GitHubSource", "build"]
 def build(track: TrackConfig, client: httpx.Client | None = None) -> Source:
     """Instantiate the source adapter a track declares."""
     if track.source == "jira":
-        return JiraSource(client=client)
+        return JiraSource(client=client, blocked_label=track.blocked_label)
     if track.source == "github":
-        return GitHubSource(repo=track.repo or "", client=client)
+        return GitHubSource(repo=track.repo or "", client=client, blocked_label=track.blocked_label)
     raise ValueError(f"unknown source {track.source!r}")

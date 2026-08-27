@@ -131,10 +131,19 @@ class TrackConfig(BaseModel):
     source: Literal["jira", "github"]
     query: str
     track: str
+    # A track is on by virtue of being present; false ships it without running
+    # it. Disabled tracks are still fully validated so they cannot rot.
+    enabled: bool = True
     # A declaration only: the agent produces the result with its own tools.
     result: str | None = None
     # GitHub Issues needs to know which repo the query and claims apply to.
     repo: str | None = None
+    # The exclusion marker `block()` applies — a label on both trackers. The
+    # track query has to exclude it, or blocked items match again (ADR-013).
+    blocked_label: str = Field(default="tina-blocked", min_length=1)
+    # What a bad run leaves on the item: "leave" retries it next cycle;
+    # "annotate" comments the effective status and applies `blocked_label`.
+    on_failure: Literal["leave", "annotate"] = "leave"
 
 
 class Config(BaseModel):

@@ -31,6 +31,14 @@ source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
 track = "remediate"         # skill name under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only — the agent produces it
+# enabled = true              # false ships the track without running it
+# on_failure = "leave"        # "annotate": after a failed, needs_human, or
+#                             # unverified run, comment the outcome on the
+#                             # item and apply blocked_label
+# blocked_label = "tina-blocked"  # the label block() applies after a bad run.
+# The query must exclude it, or blocked items match again. Jira:
+#   AND (labels IS EMPTY OR labels != "tina-blocked")
+# GitHub: -label:tina-blocked
 
 [bug]
 source = "github"

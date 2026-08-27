@@ -19,7 +19,7 @@ from typing import Annotated, Any
 import typer
 
 from tina import control, executors, harness, log, output, prompt, sources, verify
-from tina.config import Config, TrackConfig
+from tina.config import Config, ConfigError, TrackConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
 from tina.executors.base import Executor
@@ -158,6 +158,7 @@ def dispatch_track(
     fails at config load, whichever mode this runs in.
     """
     track = config.track(track_name)
+    _require_enabled(config, track)
     policy = control.load(config.control_path())
     if policy.paused:
         _paused_dispatch(track, policy, dry_run)
@@ -185,6 +186,19 @@ def dispatch_track(
     for item in items:
         executor.enqueue(track.name, item.id)
         logger.info("enqueued", extra=_item_fields(track.name, item, config.executor))
+
+
+def _require_enabled(config: Config, track: TrackConfig) -> None:
+    """A disabled track refuses loudly, in every mode.
+
+    A silent no-op would look identical to an empty backlog, which is the
+    wrong thing to be ambiguous about.
+    """
+    if not track.enabled:
+        raise ConfigError(
+            f"{config.path}: track {track.name!r} is disabled (enabled = false)",
+            fix=f"Set enabled = true in [{track.name}], or drop the key.",
+        )
 
 
 def _effective_limit(limit: int, policy: control.LoadedPolicy) -> tuple[int, str]:
@@ -305,6 +319,7 @@ def run_item(
     track_name: str,
     item_id: str,
     source: Source | None = None,
+    executor: Executor | None = None,
     dry_run: bool = False,
 ) -> RunRecord | None:
     """Claim one item, run the agent once, verify, record.
@@ -313,6 +328,10 @@ def run_item(
     outcome is data, not a process failure — so this never signals via an
     exception unless Tina itself broke.
 
+    The executor is built only to ask `run_url()` — the worker's own log link,
+    which the record carries for every outcome. Nothing is enqueued here, and
+    construction is deliberately cheap: no client exists until an enqueue.
+
     `dry_run` returns `None`, because a preview produced no run and there is no
     record to hand back. The prefix up to the claim is executed for real, so
     the preview's fidelity comes from doing the read-only work rather than
@@ -320,12 +339,16 @@ def run_item(
     """
     started = time.monotonic()
     track = config.track(track_name)
+    _require_enabled(config, track)
     source = source or sources.build(track)
 
     item = source.get(item_id)
     if dry_run:
         _preview_run(config, track, source, item, started)
         return None
+
+    executor = executor or executors.build(config)
+    run_url = executor.run_url()
 
     if not source.claim(item):
         logger.info("already claimed", extra={"track": track.name, "item": item.id})
@@ -338,6 +361,7 @@ def run_item(
             ),
             exit_code=None,
             started=started,
+            run_url=run_url,
         )
 
     harness_config = config.harness_config()
@@ -347,7 +371,9 @@ def run_item(
         result = harness.run(harness_config, text, workdir)
 
     report = verify.verify(result.report)
-    return _record(track.name, item.id, report, result.exit_code, started)
+    record = _record(track.name, item.id, report, result.exit_code, started, run_url)
+    _write_back(track, source, item, record)
+    return record
 
 
 def _preview_run(
@@ -420,12 +446,57 @@ def _preview_prompt(config: Config, track: TrackConfig, item: WorkItem) -> dict[
     }
 
 
+#: Effective statuses that trigger write-back: the runs a human must be told
+#: about. A lying `resolved` arrives here as `needs_human` via verification.
+WRITE_BACK_STATUSES = frozenset({OutcomeStatus.FAILED, OutcomeStatus.NEEDS_HUMAN})
+
+#: Details longer than this are cut from the failure comment. The comment is
+#: a pointer to the run, not a transcript of it.
+_DETAILS_LIMIT = 1000
+
+
+def _write_back(track: TrackConfig, source: Source, item: WorkItem, record: RunRecord) -> None:
+    """Leave a trace of a bad run on the item, and stop the query matching it.
+
+    Runs after the record is logged, so a write-back problem can never change
+    the recorded outcome — and the adapters' `annotate` and `block` never
+    raise (ADR-013). Clean outcomes write nothing; so does `on_failure =
+    "leave"`, the default, since annotating writes to the tracker and no
+    existing deployment asked for that.
+    """
+    if track.on_failure != "annotate" or record.effective_status not in WRITE_BACK_STATUSES:
+        return
+    source.annotate(item, _failure_comment(record))
+    source.block(item)
+
+
+def _failure_comment(record: RunRecord) -> str:
+    """The effective status, the agent's details, and the log link.
+
+    When the executor cannot name its logs the link line is simply absent —
+    a comment must never say "logs unavailable" where a pointer belongs.
+    """
+    status = f"run ended {record.effective_status}"
+    if record.report.verified is False:
+        status += " (the agent reported resolved, but artifact verification failed)"
+    lines = [f"tina: {status}; blocking this item from re-dispatch."]
+    if record.report.details:
+        details = record.report.details
+        if len(details) > _DETAILS_LIMIT:
+            details = details[:_DETAILS_LIMIT] + "…"
+        lines.append(details)
+    if record.run_url:
+        lines.append(f"Run logs: {record.run_url}")
+    return "\n\n".join(lines)
+
+
 def _record(
     track: str,
     item: str,
     report: OutcomeReport,
     exit_code: int | None,
     started: float,
+    run_url: str | None = None,
 ) -> RunRecord:
     record = RunRecord.build(
         track=track,
@@ -433,6 +504,7 @@ def _record(
         report=report,
         exit_code=exit_code,
         duration_seconds=time.monotonic() - started,
+        run_url=run_url,
     )
     logger.info("run complete", extra=record.model_dump(mode="json"))
     return record

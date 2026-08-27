@@ -70,6 +70,9 @@ class RunRecord(BaseModel):
     effective_status: OutcomeStatus
     exit_code: int | None = None
     duration_seconds: float = 0.0
+    # The executor's deep link to this run's logs. Present for every outcome;
+    # None when the environment cannot tell (the local executor always).
+    run_url: str | None = None
 
     @classmethod
     def build(
@@ -79,6 +82,7 @@ class RunRecord(BaseModel):
         report: OutcomeReport,
         exit_code: int | None,
         duration_seconds: float,
+        run_url: str | None = None,
     ) -> RunRecord:
         return cls(
             track=track,
@@ -87,4 +91,5 @@ class RunRecord(BaseModel):
             effective_status=report.effective_status,
             exit_code=exit_code,
             duration_seconds=round(duration_seconds, 3),
+            run_url=run_url,
         )

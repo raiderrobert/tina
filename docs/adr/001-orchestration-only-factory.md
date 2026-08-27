@@ -34,3 +34,12 @@ and to tell the image build which credentials it needs.
   [007](007-generic-artifact-verification.md).
 - Tina never inspects work item content. All judgment about what an item is
   happens inside the track.
+
+## Amendment (2026-08-27)
+
+"Tina never writes a result" stands, with the boundary now drawn precisely.
+Lifecycle writes — claiming an item, annotating a failed run, blocking an item
+from re-dispatch — are not result writes. They record what became of the
+attempt, not the work product, and Tina has always made one of them (`claim`).
+The distinction and its consequences are in
+[013](013-lifecycle-write-back-is-not-result-writing.md).
