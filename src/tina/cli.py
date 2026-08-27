@@ -19,7 +19,7 @@ from typing import Annotated, Any
 import typer
 
 from tina import control, executors, harness, log, output, prompt, sources, verify
-from tina.config import Config, TrackConfig
+from tina.config import Config, ConfigError, TrackConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
 from tina.executors.base import Executor
@@ -158,6 +158,7 @@ def dispatch_track(
     fails at config load, whichever mode this runs in.
     """
     track = config.track(track_name)
+    _require_enabled(config, track)
     policy = control.load(config.control_path())
     if policy.paused:
         _paused_dispatch(track, policy, dry_run)
@@ -185,6 +186,19 @@ def dispatch_track(
     for item in items:
         executor.enqueue(track.name, item.id)
         logger.info("enqueued", extra=_item_fields(track.name, item, config.executor))
+
+
+def _require_enabled(config: Config, track: TrackConfig) -> None:
+    """A disabled track refuses loudly, in every mode.
+
+    A silent no-op would look identical to an empty backlog, which is the
+    wrong thing to be ambiguous about.
+    """
+    if not track.enabled:
+        raise ConfigError(
+            f"{config.path}: track {track.name!r} is disabled (enabled = false)",
+            fix=f"Set enabled = true in [{track.name}], or drop the key.",
+        )
 
 
 def _effective_limit(limit: int, policy: control.LoadedPolicy) -> tuple[int, str]:
@@ -320,6 +334,7 @@ def run_item(
     """
     started = time.monotonic()
     track = config.track(track_name)
+    _require_enabled(config, track)
     source = source or sources.build(track)
 
     item = source.get(item_id)

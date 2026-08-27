@@ -342,6 +342,60 @@ def test_reports_an_unknown_track(project: Path) -> None:
     assert "no track named 'bug'" in last_record(result.output)["message"]
 
 
+# --- disabled tracks: refuse loudly, never silently no-op --------------------
+
+
+@pytest.fixture
+def disabled(project: Path) -> Path:
+    """The project config with its one track switched off."""
+    project.write_text(project.read_text() + "\nenabled = false\n")
+    return project
+
+
+def test_dispatch_refuses_a_disabled_track(disabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A silent no-op would look identical to an empty backlog."""
+    source, executor = NoQuerySource(items("VUL-1")), FakeExecutor()
+    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(executors, "build", lambda config: executor)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(disabled)])
+
+    assert result.exit_code == 1
+    assert executor.enqueued == []
+    message = last_record(result.stdout)["message"]
+    assert "'vul'" in message
+    assert "disabled" in message
+    assert "enabled = true" in plain(result.stderr)
+
+
+def test_run_refuses_a_disabled_track(disabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = wire(monkeypatch, NoClaimSource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(disabled)]
+    )
+
+    assert result.exit_code == 1
+    assert source.claims == []
+    message = last_record(result.stdout)["message"]
+    assert "'vul'" in message
+    assert "disabled" in message
+
+
+def test_a_dry_run_of_a_disabled_track_also_refuses(
+    disabled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preview of a track that cannot run would only mislead."""
+    wire(monkeypatch, NoQuerySource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(disabled), "--dry-run"]
+    )
+
+    assert result.exit_code == 1
+    assert "disabled" in last_record(result.stdout)["message"]
+
+
 # --- both halves of the stdout/stderr boundary ------------------------------
 
 

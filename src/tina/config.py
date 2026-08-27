@@ -131,6 +131,9 @@ class TrackConfig(BaseModel):
     source: Literal["jira", "github"]
     query: str
     track: str
+    # A track is on by virtue of being present; false ships it without running
+    # it. Disabled tracks are still fully validated so they cannot rot.
+    enabled: bool = True
     # A declaration only: the agent produces the result with its own tools.
     result: str | None = None
     # GitHub Issues needs to know which repo the query and claims apply to.
