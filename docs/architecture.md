@@ -293,6 +293,13 @@ Singular `harness` selects; plural `[harnesses.<name>]` defines. TOML will not l
 one key be both a string and a table, so the two cannot share a name. `executor`
 and `[executors.<name>]` work the same way.
 
+The command may reference three placeholders: `{prompt_file}`, `{outcome_dir}`,
+and `{model}`. A command referencing `{model}` requires every track to set
+`model` — small fast models for triage tracks, frontier ones for code-change
+tracks — and a track setting `model` under a command that never references it
+is equally a config-load error, because the value would silently not reach the
+harness.
+
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
 output path in the prompt and instructs the agent to write `outcome.json` there

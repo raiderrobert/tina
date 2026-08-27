@@ -118,6 +118,64 @@ def test_an_empty_blocked_label_fails_fast(tmp_path: Path) -> None:
         config.load(write(tmp_path, MINIMAL + '\nblocked_label = ""\n'))
 
 
+MODEL_COMMAND = MINIMAL.replace(
+    'command = ["pi", "--prompt-file", "{prompt_file}"]',
+    'command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]',
+)
+
+
+def test_model_defaults_to_none(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").model is None
+
+
+def test_model_is_kept(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODEL_COMMAND + '\nmodel = "claude-sonnet-x"\n'))
+
+    assert cfg.track("vul").model == "claude-sonnet-x"
+
+
+def test_a_model_command_requires_model_on_every_track(tmp_path: Path) -> None:
+    """The named track is the one missing the key, not the first one."""
+    text = (
+        MODEL_COMMAND
+        + '\nmodel = "claude-sonnet-x"\n'
+        + '\n[bug]\nsource = "jira"\nquery = "project = BUGS"\n'
+    )
+    with pytest.raises(config.ConfigError, match=r"\[bug\].*\{model\}"):
+        config.load(write(tmp_path, text))
+
+
+def test_model_without_a_model_command_fails_at_load(tmp_path: Path) -> None:
+    """The value would silently never reach the harness."""
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*\{model\}"):
+        config.load(write(tmp_path, MINIMAL + '\nmodel = "claude-sonnet-x"\n'))
+
+
+@pytest.mark.parametrize("value", ["", "two words", "tab\there", " padded"])
+def test_a_malformed_model_value_fails_at_load(tmp_path: Path, value: str) -> None:
+    """Shape only — whether the model exists is the deployment's problem."""
+    with pytest.raises(config.ConfigError, match="model"):
+        config.load(write(tmp_path, MODEL_COMMAND + f'\nmodel = "{value}"\n'))
+
+
+def test_a_model_command_on_an_unselected_harness_needs_nothing(tmp_path: Path) -> None:
+    """Only the selected harness's command binds the tracks."""
+    text = MINIMAL + '\n[harnesses.claude]\ncommand = ["claude", "{prompt_file}", "{model}"]\n'
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").model is None
+
+
+def test_argv_template_renders_the_model(tmp_path: Path) -> None:
+    template = config.ArgvTemplate(args=["agent", "{prompt_file}", "--model", "{model}"])
+
+    rendered = template.render(tmp_path / "prompt.md", tmp_path, model="claude-sonnet-x")
+
+    assert rendered == ["agent", str(tmp_path / "prompt.md"), "--model", "claude-sonnet-x"]
+
+
 def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="jql"):
         config.load(write(tmp_path, MINIMAL + '\njql = "project = VUL"\n'))
@@ -219,7 +277,7 @@ def test_a_typo_in_a_placeholder_is_not_passed_through(tmp_path: Path) -> None:
 
 def test_an_unknown_placeholder_names_what_is_supported(tmp_path: Path) -> None:
     text = MINIMAL.replace("{prompt_file}", "{workdir}")
-    with pytest.raises(config.ConfigError, match=r"\{outcome_dir\}, \{prompt_file\}"):
+    with pytest.raises(config.ConfigError, match=r"\{model\}, \{outcome_dir\}, \{prompt_file\}"):
         config.load(write(tmp_path, text))
 
 

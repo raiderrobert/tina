@@ -67,11 +67,12 @@ def run(
     prompt: str,
     workdir: Path,
     timeout: float | None = None,
+    model: str | None = None,
 ) -> HarnessResult:
     """Write the prompt, run the harness once, read whatever it left behind."""
     prompt_file = write_prompt(prompt, workdir)
 
-    command = config.command.render(prompt_file, workdir)
+    command = config.command.render(prompt_file, workdir, model=model)
     log.info("harness starting", extra={"harness": config.name, "command": command})
 
     try:

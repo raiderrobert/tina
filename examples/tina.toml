@@ -15,6 +15,9 @@ tracks_dir = "tracks"
 
 [harnesses.pi]
 command = ["pi", "--prompt-file", "{prompt_file}"]
+# A command may also reference {model}; every track must then set `model`,
+# so each track picks the model its work deserves:
+# command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]
 
 [harnesses.claude]
 command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
@@ -31,6 +34,8 @@ source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
 track = "remediate"         # skill name under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only — the agent produces it
+# model = "claude-sonnet-x"   # substituted for {model} in the harness command;
+#                             # required exactly when the command references it
 # enabled = true              # false ships the track without running it
 # on_failure = "leave"        # "annotate": after a failed, needs_human, or
 #                             # unverified run, comment the outcome on the

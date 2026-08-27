@@ -688,6 +688,45 @@ def test_a_lost_claim_exits_no_action_needed(project: Path, records: io.StringIO
     assert last_record(records.getvalue())["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
 
 
+# --- model: the track's model reaches the rendered command -------------------
+
+
+@pytest.fixture
+def modeled(project: Path) -> Path:
+    """The project config with a {model} command and a track model."""
+    text = project.read_text()
+    text = text.replace('"{outcome_dir}"]', '"{outcome_dir}", "{model}"]')
+    project.write_text(text + '\nmodel = "claude-sonnet-x"\n')
+    script = project.parent / "agent.py"
+    script.write_text(
+        AGENT + 'assert sys.argv[3] == "claude-sonnet-x", "model missing from argv"\n'
+    )
+    return project
+
+
+def test_a_real_run_hands_the_model_to_the_harness(
+    modeled: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    """The fake agent itself asserts the substituted argv, so a dropped model fails."""
+    result = runner.invoke(
+        cli.app, ["run", "--track", "vul", "--item", "VUL-1", "--config", str(modeled)]
+    )
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["exit_code"] == 0, "the agent's asserts all passed"
+
+
+def test_a_dry_run_previews_the_model_in_the_command(
+    modeled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(cli.app, [*DRY_RUN_ARGV, "--config", str(modeled)])
+
+    assert result.exit_code == 0
+    assert last_record(result.stdout)["command"][-1] == "claude-sonnet-x"
+
+
 # --- on_failure: a bad run leaves a trace and stops matching -----------------
 
 RUN_ARGV = ["run", "--track", "vul", "--item", "VUL-1"]
