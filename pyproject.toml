@@ -1,6 +1,6 @@
 [project]
 name = "tina-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "An autonomous factory. Orchestration only: claim a work item, run an agent once, record the outcome."
 readme = "README.md"
 license = "MIT"
