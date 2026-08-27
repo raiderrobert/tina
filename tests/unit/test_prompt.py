@@ -75,6 +75,24 @@ def test_unclosed_frontmatter_is_left_as_is(tmp_path: Path, work_item: WorkItem)
     assert "no closing delimiter" in text
 
 
+def test_a_sweep_prompt_omits_the_work_item_block(tmp_path: Path) -> None:
+    """No item means no block at all, not an empty one."""
+    outcome_path = tmp_path / "run" / "outcome.json"
+    text = prompt.build(track(tmp_path), None, outcome_path)
+
+    assert "## Work item" not in text
+    assert "```json" not in text
+    assert "Fix the vulnerability." in text
+    assert str(outcome_path) in text, "the outcome contract is unchanged"
+
+
+def test_a_sweep_prompt_still_opens_with_the_skill_root(tmp_path: Path) -> None:
+    directory = track(tmp_path)
+    text = prompt.build(directory, None, tmp_path / "outcome.json")
+
+    assert str(directory.resolve()) in "\n".join(text.splitlines()[:4])
+
+
 def test_missing_skill_points_at_napoln(tmp_path: Path, work_item: WorkItem) -> None:
     with pytest.raises(prompt.PromptError) as excinfo:
         prompt.build(tmp_path / "tracks" / "nope", work_item, tmp_path / "outcome.json")

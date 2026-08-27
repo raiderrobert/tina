@@ -76,6 +76,23 @@ One track can produce different results per run: the vulnerability track
 ends in a PR link or a discovery comment depending on what it finds. Results are
 not 1:1 with tracks.
 
+### Sweep tracks
+
+Not every useful track has a queue: scan recent job executions and file an
+issue per failure signature, sweep for stuck claims, produce a periodic
+report. `mode = "sweep"` declares such a track
+([ADR-015](adr/015-sweep-tracks-run-without-a-work-item.md)). Its `dispatch`
+enqueues exactly one worker with no item and runs no query; `--limit` does not
+apply, though the control file still gates it — paused wins, and a sweep
+launch counts as one worker against `max_concurrency`. Its `run` takes no
+`--item`, skips the source, the claim, and the eligibility re-check, and
+omits the work-item block from the prompt. The outcome contract, verification,
+and the run record are unchanged; the record carries a stable `sweep` marker
+where the item id would be. Discovering the work, deduplicating it against
+what was already filed, and delivering it is the skill's job. Queue keys
+(`source`, `query`, claim and failure policy) are invalid on a sweep entry
+and rejected at config load.
+
 ---
 
 ## 5. Dispatch and worker
@@ -524,8 +541,9 @@ a directory. Versioning, pinning, and three-way-merge upgrades are napoln's job.
 | Tracks | none shipped; installed via napoln |
 
 Deferred: REST/webhook entrypoint, `normalize(payload)`, typed result verifiers,
-per-track images, stuck-claim sweeper, Linear and Asana adapters, k8s and ECS
-executors.
+per-track images, Linear and Asana adapters, k8s and ECS executors. The
+stuck-claim sweeper, once deferred here, is now expressible as a sweep track
+(§4) rather than Tina code.
 
 ---
 

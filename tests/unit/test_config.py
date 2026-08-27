@@ -232,6 +232,82 @@ def test_claim_transition_under_claim_none_fails_fast(tmp_path: Path) -> None:
         config.load(write(tmp_path, text))
 
 
+SWEEP = """
+harness = "pi"
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+[reap]
+mode = "sweep"
+"""
+
+
+def test_mode_defaults_to_queue(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("vul").mode == "queue"
+
+
+def test_a_sweep_track_needs_no_source_or_query(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, SWEEP))
+
+    assert cfg.track("reap").mode == "sweep"
+    assert cfg.track("reap").source is None
+
+
+def test_an_unknown_mode_fails_fast(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match=r"\[reap\].*mode"):
+        config.load(write(tmp_path, SWEEP.replace('"sweep"', '"cron"')))
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        'source = "jira"',
+        'query = "project = VUL"',
+        'repo = "acme/api"',
+        'claim = "none"',
+        'claim_label = "bot-claimed"',
+        'claim_transition = "In Progress"',
+        'on_failure = "annotate"',
+        'blocked_label = "tina-blocked"',
+    ],
+)
+def test_a_queue_key_on_a_sweep_entry_fails_at_load(tmp_path: Path, key: str) -> None:
+    """Each stray key is named, even one set to its default value."""
+    name = key.split(" ")[0]
+    with pytest.raises(config.ConfigError, match=rf"\[reap\].*{name}"):
+        config.load(write(tmp_path, SWEEP + key + "\n"))
+
+
+def test_every_stray_queue_key_is_named_together(tmp_path: Path) -> None:
+    text = SWEEP + 'source = "jira"\nquery = "project = VUL"\non_failure = "annotate"\n'
+    with pytest.raises(config.ConfigError, match="on_failure, query, source"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_sweep_track_keeps_enabled_model_and_env(tmp_path: Path) -> None:
+    text = (
+        SWEEP.replace(
+            'command = ["pi", "--prompt-file", "{prompt_file}"]',
+            'command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]',
+        )
+        + 'enabled = false\nmodel = "claude-haiku-x"\n\n[reap.env]\nREAPER_DRY = "1"\n'
+    )
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("reap").enabled is False
+    assert cfg.track("reap").model == "claude-haiku-x"
+    assert cfg.track("reap").env == {"REAPER_DRY": "1"}
+
+
+def test_a_queue_track_without_a_source_fails_at_load(tmp_path: Path) -> None:
+    text = MINIMAL.replace('source = "jira"\n', "")
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*source"):
+        config.load(write(tmp_path, text))
+
+
 def test_env_defaults_to_empty(tmp_path: Path) -> None:
     """Tracks without the table are unaffected."""
     cfg = config.load(write(tmp_path, MINIMAL))
@@ -349,7 +425,8 @@ def test_cloudrun_options_are_kept(tmp_path: Path) -> None:
 def test_example_config_is_valid() -> None:
     cfg = config.load(Path(__file__).parent.parent.parent / "examples" / "tina.toml")
 
-    assert sorted(cfg.tracks) == ["bug", "vul"]
+    assert sorted(cfg.tracks) == ["bug", "stuck-claims", "vul"]
+    assert cfg.track("stuck-claims").mode == "sweep"
     assert cfg.track("bug").repo == "acme/api"
 
 

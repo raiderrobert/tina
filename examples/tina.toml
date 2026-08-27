@@ -67,3 +67,11 @@ result = "github:issue-comment"
 # [bug.env]
 # TRIAGED_LABEL = "bot-triaged"
 # BOT_LOGINS = "bot-one,bot-two"
+
+# A sweep track has no queue: dispatch enqueues exactly one worker with no
+# item, and the skill discovers, dedupes, and delivers the work itself.
+# Queue keys (source, query, claim and failure policy) are invalid here;
+# enabled, model, and env still apply.
+[stuck-claims]
+mode = "sweep"
+track = "sweep-stuck-claims"

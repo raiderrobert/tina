@@ -51,17 +51,12 @@ class CloudRunExecutor:
     def job_path(self) -> str:
         return self.options.job_path()
 
-    def enqueue(self, track: str, item_id: str) -> None:
+    def enqueue(self, track: str, item_id: str | None = None) -> None:
         run_v2 = _run_v2()
-        args = [
-            "run",
-            "--track",
-            track,
-            "--item",
-            item_id,
-            "--config",
-            self.config_path,
-        ]
+        args = ["run", "--track", track]
+        if item_id is not None:
+            args += ["--item", item_id]
+        args += ["--config", self.config_path]
         request = run_v2.RunJobRequest(
             name=self.job_path,
             overrides=run_v2.RunJobRequest.Overrides(
@@ -71,7 +66,7 @@ class CloudRunExecutor:
         self.client.run_job(request=request)
         log.info(
             "worker enqueued",
-            extra={"track": track, "item": item_id, "job": self.job_path},
+            extra={"track": track, "item": item_id or "", "job": self.job_path},
         )
 
     def run_url(self) -> str | None:
