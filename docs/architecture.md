@@ -391,6 +391,15 @@ jql = "project = VUL AND status in open and unassgined = TRUE"
 `track` key survives by name, but the modern one drops the directory prefix:
 `tracks_dir` owns the path, so the value is the bare skill name.
 
+### Runtime policy
+
+`tina.toml` declares what exists and changes at deploy speed. Runtime gates —
+`paused`, `max_concurrency` — are policy, a different tier: they change in
+minutes, without a deploy, by whoever holds the pager. Policy lives in a
+separate control file, read fresh by the dispatcher every cycle, failing
+closed. The plane split and its invariants are argued in
+[ADR-011](adr/011-control-plane-data-plane-split.md).
+
 ---
 
 ## 16. Track anatomy
