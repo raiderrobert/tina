@@ -398,7 +398,9 @@ jql = "project = VUL AND status in open and unassgined = TRUE"
 minutes, without a deploy, by whoever holds the pager. Policy lives in a
 separate control file, read fresh by the dispatcher every cycle, failing
 closed. The plane split and its invariants are argued in
-[ADR-011](adr/011-control-plane-data-plane-split.md).
+[ADR-011](adr/011-control-plane-data-plane-split.md); the file's transport —
+a path Tina reads, never an object Tina fetches — in
+[ADR-012](adr/012-control-file-is-a-path.md).
 
 ---
 
