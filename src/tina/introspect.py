@@ -23,7 +23,9 @@ from tina.config import Config, TrackConfig
 #: stays readable. A key added to `TrackConfig` without a line here fails
 #: `tests/unit/test_introspect.py`.
 DESCRIPTIONS: dict[str, str] = {
-    "name": "The table name. Identifies the track; `tina run --track <name>`, case-insensitive.",
+    "name": (
+        "The table name. Identifies the track — what `--track <name>` selects, case-insensitively."
+    ),
     "mode": (
         '`"queue"` runs the source query and hands each worker one item; `"sweep"` launches '
         "one worker with no item, and the skill discovers, dedupes, and delivers the work."
@@ -47,8 +49,8 @@ DESCRIPTIONS: dict[str, str] = {
     "extra": "Jira structured input: a predicate appended as `AND (...)`.",
     "labels": "GitHub structured input: labels an issue must carry (all of them).",
     "enabled": (
-        "`false` ships the track without running it: dispatch and run refuse, `tina tracks` "
-        "reports it disabled, and it is still validated."
+        "`false` ships the track without running it: dispatch and run refuse, the track "
+        "listing reports it disabled, and it is still validated."
     ),
     "model": (
         "Substituted for `{model}` in the harness command. Required exactly when the selected "
