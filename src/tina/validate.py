@@ -11,8 +11,8 @@ are cheap and catch most of it:
 3. Router-to-paths closure for multi-file skills: every `paths/*.md` the
    router dispatches to exists, and every file in `paths/` is dispatched to
    — an orphan is dead content that still ships.
-4. Every relative `paths/…`, `references/…`, `scripts/…` reference resolves;
-   no absolute paths and no variable-indirected paths to skill content. Both
+4. Every relative `paths/…` and `references/…` reference resolves; no
+   absolute paths and no variable-indirected paths to skill content. Both
    work on the author's machine and break in the image.
 5. Every bare `$TOKEN` in skill prose is one Tina substitutes. Code fences and
    inline code are exempt — they hold shell the agent runs.
@@ -53,9 +53,10 @@ class FieldConstraint:
 NAME = FieldConstraint(max_len=64, pattern=re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$"))
 DESCRIPTION = FieldConstraint(max_len=1024)
 
-_REL_REF = re.compile(
-    r"(?:paths|references|scripts)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.[A-Za-z0-9]+"
-)
+# Prose references to skill content. `scripts/` is deliberately not matched:
+# a script is invoked from a code block, where an example path is common and
+# a real one fails loudly at run time anyway.
+_REL_REF = re.compile(r"(?:paths|references)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.md")
 _TOKEN = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?")
 _FENCE = re.compile(r"^[ \t]*```.*?^[ \t]*```", re.MULTILINE | re.DOTALL)
 _CODE_SPAN = re.compile(r"`[^`\n]*`")
