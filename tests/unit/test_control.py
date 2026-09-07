@@ -85,6 +85,24 @@ def test_an_unknown_key_pauses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert control.load().paused is True
 
 
+def test_a_deployments_own_table_passes_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tina's keys stay strict; a table it does not define is the deployment's."""
+    text = 'paused = false\nmax_concurrency = 3\n\n[factory]\ngovernor = "active"\n'
+    monkeypatch.setenv("TINA_CONTROL", str(write(tmp_path, text)))
+
+    loaded = control.load()
+
+    assert loaded.paused is False
+    assert loaded.max_concurrency == 3
+    assert loaded.extra == {"factory": {"governor": "active"}}
+
+
+def test_defaults_carry_no_extra() -> None:
+    assert control.load().extra == {}
+
+
 def test_a_negative_max_concurrency_pauses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TINA_CONTROL", str(write(tmp_path, "max_concurrency = -1")))
 

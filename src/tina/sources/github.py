@@ -293,8 +293,14 @@ class GitHubSource:
         return response
 
     def _to_item(self, issue: Issue) -> WorkItem:
+        """`owner/name#N`: an issue's identity is its repo and its number.
+
+        Fully qualified so the id is unambiguous in a run record or a log line,
+        and so a skill can name the repo without parsing the payload. Every
+        entry point accepts the bare number too (`_number`).
+        """
         return WorkItem(
-            id=str(issue.number),
+            id=f"{self.repo}#{issue.number}",
             source=self.name,
             title=issue.title,
             description=issue.body or "",
