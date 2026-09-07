@@ -105,6 +105,15 @@ class Source(Protocol):
         """
         ...
 
+    def login(self) -> str:
+        """Prove the credentials in the environment reach the tracker.
+
+        One read that needs authentication — who the token belongs to — and
+        the identity it resolved, for `tina doctor` to print. Raises
+        `SourceError` when the tracker refuses. Writes nothing.
+        """
+        ...
+
 
 class SourceError(TinaError, RuntimeError):
     """A source adapter could not talk to its tracker."""
@@ -185,15 +194,21 @@ def send_with_retry(
         sleep(wait)
 
 
-def require_env(name: str, source: str) -> str:
-    """Read a required environment variable or fail with a usable message."""
-    value = os.environ.get(name)
-    if not value:
-        raise SourceError(
-            f"{source} source requires the {name} environment variable",
-            fix=f"Set {name} in the worker environment.",
-        )
-    return value
+def require_env(name: str, source: str, *alternatives: str) -> str:
+    """Read a required environment variable or fail with a usable message.
+
+    `alternatives` are other names the same credential travels under —
+    `GH_TOKEN` for the GitHub CLI's convention beside `GITHUB_TOKEN`. The
+    first one set wins; the error names the canonical one.
+    """
+    for candidate in (name, *alternatives):
+        value = os.environ.get(candidate)
+        if value:
+            return value
+    raise SourceError(
+        f"{source} source requires the {name} environment variable",
+        fix=f"Set {name} in the worker environment.",
+    )
 
 
 def parse_payload[M: BaseModel](

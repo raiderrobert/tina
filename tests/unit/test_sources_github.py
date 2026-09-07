@@ -565,3 +565,34 @@ def test_block_failure_is_logged_and_swallowed(
         source(handler).block(item)
 
     assert any("block failed" in record.message for record in caplog.records)
+
+
+# --- credentials and login ------------------------------------------------------
+
+
+def test_gh_token_is_accepted_as_the_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghp_from_the_cli_convention")
+
+    src = GitHubSource(repo=REPO)
+
+    assert src.client.headers["Authorization"] == "Bearer ghp_from_the_cli_convention"
+
+
+def test_github_token_wins_over_gh_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "canonical")
+    monkeypatch.setenv("GH_TOKEN", "alternative")
+
+    assert GitHubSource(repo=REPO).client.headers["Authorization"] == "Bearer canonical"
+
+
+def test_the_error_names_the_canonical_variable() -> None:
+    with pytest.raises(SourceError, match="GITHUB_TOKEN"):
+        GitHubSource(repo=REPO)
+
+
+def test_login_reports_who_the_token_acts_as() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user"
+        return httpx.Response(200, json={"login": "acme-bot"})
+
+    assert source(handler, bot_login=None).login() == "acme-bot"

@@ -99,3 +99,27 @@ def test_missing_skill_points_at_napoln(tmp_path: Path, work_item: WorkItem) -> 
 
     assert "track skill not found" in str(excinfo.value)
     assert "napoln" in excinfo.value.fix
+
+
+def test_the_work_item_token_is_substituted_in_the_skill(
+    tmp_path: Path, work_item: WorkItem
+) -> None:
+    track = tmp_path / "remediate"
+    track.mkdir()
+    (track / "SKILL.md").write_text("Work item: $WORK_ITEM_ID\n\nRead $WORK_ITEM_ID first.\n")
+
+    text = prompt.build(track, work_item, tmp_path / "outcome.json")
+
+    assert "Work item: VUL-1" in text
+    assert "Read VUL-1 first." in text
+    assert "$WORK_ITEM_ID" not in text
+
+
+def test_a_sweep_leaves_the_token_alone(tmp_path: Path) -> None:
+    track = tmp_path / "sweep"
+    track.mkdir()
+    (track / "SKILL.md").write_text("Nothing to see: $WORK_ITEM_ID\n")
+
+    text = prompt.build(track, None, tmp_path / "outcome.json")
+
+    assert "$WORK_ITEM_ID" in text

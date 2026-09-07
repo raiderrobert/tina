@@ -668,3 +668,105 @@ def test_block_failure_is_logged_and_swallowed(
         source(handler).block(work_item)
 
     assert any("block failed" in record.message for record in caplog.records)
+
+
+# --- bot identity, login, block by transition ----------------------------------
+
+
+def test_the_bot_account_is_looked_up_from_myself_when_unset() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"accountId": "me-123", "displayName": "Bot"})
+
+    src = JiraSource(client=httpx.Client(transport=httpx.MockTransport(handler)), base_url=BASE)
+
+    assert src.bot_account_id == "me-123"
+    assert src.bot_account_id == "me-123"
+    assert calls == ["/rest/api/3/myself"], "looked up once, then cached"
+
+
+def test_the_env_bot_account_id_is_still_honored(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JIRA_BOT_ACCOUNT_ID", "from-env")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no lookup when configured")
+
+    src = JiraSource(client=httpx.Client(transport=httpx.MockTransport(handler)), base_url=BASE)
+
+    assert src.bot_account_id == "from-env"
+
+
+def test_login_reports_who_the_credentials_act_as() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"accountId": "me-123"})
+
+    assert (
+        JiraSource(
+            client=httpx.Client(transport=httpx.MockTransport(handler)), base_url=BASE
+        ).login()
+        == "me-123"
+    )
+
+
+def test_login_raises_when_the_tracker_refuses() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="nope")
+
+    with pytest.raises(SourceError, match="401"):
+        JiraSource(
+            client=httpx.Client(transport=httpx.MockTransport(handler)), base_url=BASE
+        ).login()
+
+
+def test_block_transitions_when_a_blocked_transition_is_configured(work_item: WorkItem) -> None:
+    calls: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.content))
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "transitions": [
+                        {"id": "11", "name": "Start work", "to": {"name": "In Progress"}},
+                        {"id": "31", "name": "Block it", "to": {"name": "Blocked"}},
+                    ]
+                },
+            )
+        return httpx.Response(204)
+
+    source(handler, blocked_transition="Blocked").block(work_item)
+
+    assert [c[:2] for c in calls] == [
+        ("GET", "/rest/api/3/issue/VUL-1/transitions"),
+        ("POST", "/rest/api/3/issue/VUL-1/transitions"),
+    ]
+    assert json.loads(calls[1][2]) == {"transition": {"id": "31"}}, "matched on the target status"
+
+
+def test_block_by_transition_matches_a_transition_name_too(work_item: WorkItem) -> None:
+    posted: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"transitions": [{"id": "5", "name": "Blocked"}]})
+        posted.append(request.content)
+        return httpx.Response(204)
+
+    source(handler, blocked_transition="blocked").block(work_item)
+
+    assert json.loads(posted[0]) == {"transition": {"id": "5"}}
+
+
+def test_block_by_transition_is_best_effort(
+    work_item: WorkItem, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"transitions": []})
+
+    with caplog.at_level(logging.WARNING):
+        source(handler, blocked_transition="Blocked").block(work_item)
+
+    assert "block transition not available" in caplog.text

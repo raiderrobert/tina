@@ -131,7 +131,7 @@ class GitHubSource:
         self.api_base = (api_base or os.environ.get("GITHUB_API_URL") or API_BASE).rstrip("/")
         self._bot_login = bot_login or os.environ.get("GITHUB_BOT_LOGIN")
         if client is None:
-            token = require_env("GITHUB_TOKEN", "github")
+            token = require_env("GITHUB_TOKEN", "github", "GH_TOKEN")
             client = httpx.Client(
                 headers={"Authorization": f"Bearer {token}", "Accept": ACCEPT},
                 timeout=30.0,
@@ -147,6 +147,10 @@ class GitHubSource:
             if not self._bot_login:
                 raise SourceError("github: could not determine the bot login from GET /user")
         return self._bot_login
+
+    def login(self) -> str:
+        """`GET /user`: the token works, and this is who it acts as."""
+        return self.bot_login
 
     def query(self, q: str) -> list[WorkItem]:
         params = SearchParams(q=q)

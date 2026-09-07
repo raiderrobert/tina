@@ -1,32 +1,54 @@
-"""`tina dispatch`, `tina run`, and `tina status`. Two roles, one image.
+"""`tina dispatch`, `tina run`, `tina status`, and the admission and
+introspection commands around them. Two roles, one image.
 
 The typer commands are a thin shell: they parse argv, load config, and turn a
 `TinaError` into exit 1. The orchestration lives in `dispatch_track`,
 `run_item`, and `status_track`, which take already-built objects so callers
-(and tests) can inject a source or executor.
+(and tests) can inject a source, an executor, or a governor.
 """
 
 from __future__ import annotations
 
+import os
 import shlex
 import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import typer
 
-from tina import control, executors, harness, log, output, prompt, sources, verify
+from tina import (
+    control,
+    doctor,
+    executors,
+    harness,
+    introspect,
+    log,
+    output,
+    prompt,
+    sources,
+    verify,
+)
+from tina import validate as admission
 from tina.config import Config, ConfigError, TrackConfig
 from tina.config import load as load_config
 from tina.errors import TinaError
 from tina.executors.base import Executor
+from tina.governor import Governor
 from tina.models import SWEEP_ITEM, OutcomeReport, OutcomeStatus, RunRecord, WorkItem
 from tina.sources.base import Source
 
+#: Where the config is when no `--config` is given: `TINA_CONFIG`, else
+#: `tina.toml` in the working directory. One image, mounted anywhere.
+CONFIG_VAR = "TINA_CONFIG"
 DEFAULT_CONFIG = Path("tina.toml")
+
+#: Live workers a queue track may have when nothing — `--limit`, the track,
+#: the control file — says otherwise. Conservative on purpose.
+DEFAULT_LIMIT = 1
 
 logger = log.get_logger("tina")
 
@@ -39,7 +61,18 @@ app = typer.Typer(
 )
 
 TrackOption = Annotated[str, typer.Option("--track", help="Track table in the config.")]
-ConfigOption = Annotated[Path, typer.Option("--config", help="Path to the TOML config file.")]
+ConfigOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--config", help=f"Path to the TOML config file. Default: ${CONFIG_VAR}, else tina.toml."
+    ),
+]
+
+
+def _config_path(given: Path | None) -> Path:
+    if given is not None:
+        return given
+    return Path(os.environ.get(CONFIG_VAR) or DEFAULT_CONFIG)
 
 
 def _version_callback(value: bool) -> None:
@@ -71,17 +104,22 @@ def _global_options(
 def dispatch(
     track: TrackOption,
     limit: Annotated[
-        int, typer.Option("--limit", help="Maximum number of workers to enqueue.")
-    ] = 1,
-    config: ConfigOption = DEFAULT_CONFIG,
+        int | None,
+        typer.Option(
+            "--limit",
+            help="Cap on live workers. Lowers the track's or the control file's cap; "
+            f"with none of the three set, {DEFAULT_LIMIT}.",
+        ),
+    ] = None,
+    config: ConfigOption = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview the matched items without enqueueing anything."),
     ] = False,
 ) -> None:
-    """Run the source query and enqueue up to --limit workers."""
+    """Run the source query and enqueue workers up to the effective cap."""
     with _exit_on_tina_error("dispatch"):
-        dispatch_track(load_config(config), track, limit, dry_run=dry_run)
+        dispatch_track(load_config(_config_path(config)), track, limit, dry_run=dry_run)
 
 
 @app.command()
@@ -91,7 +129,14 @@ def run(
         str | None,
         typer.Option("--item", help="Tracker identifier of the work item. Sweep tracks take none."),
     ] = None,
-    config: ConfigOption = DEFAULT_CONFIG,
+    config: ConfigOption = None,
+    model: Annotated[
+        str | None,
+        typer.Option(
+            "--model",
+            help="Run on this model instead of the track's own, for trying one out.",
+        ),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -102,17 +147,93 @@ def run(
 ) -> None:
     """Claim one work item, run the agent, record the outcome."""
     with _exit_on_tina_error("run"):
-        run_item(load_config(config), track, item, dry_run=dry_run)
+        run_item(load_config(_config_path(config)), track, item, dry_run=dry_run, model=model)
 
 
 @app.command()
 def status(
     track: TrackOption,
-    config: ConfigOption = DEFAULT_CONFIG,
+    config: ConfigOption = None,
 ) -> None:
     """Report how many items are waiting and how many workers hold."""
     with _exit_on_tina_error("status"):
-        status_track(load_config(config), track)
+        status_track(load_config(_config_path(config)), track)
+
+
+@app.command()
+def tracks(
+    config: ConfigOption = None,
+    format: Annotated[
+        Literal["text", "json"],
+        typer.Option("--format", help="text: one name per line; json: one object per track."),
+    ] = "text",
+) -> None:
+    """List the configured tracks, so infrastructure can be derived from the same file."""
+    with _exit_on_tina_error("tracks"):
+        loaded = load_config(_config_path(config))
+        text = (
+            introspect.tracks_json(loaded) if format == "json" else introspect.tracks_text(loaded)
+        )
+        typer.echo(text, nl=False)
+
+
+@app.command(name="config-options")
+def config_options(
+    format: Annotated[
+        Literal["text", "markdown", "json"],
+        typer.Option("--format", help="text, markdown (a table), or json (JSON Schema)."),
+    ] = "text",
+) -> None:
+    """Explain every track key: type, default, and meaning, from the schema itself."""
+    renderers = {
+        "text": introspect.options_text,
+        "markdown": introspect.options_markdown,
+        "json": introspect.options_json,
+    }
+    typer.echo(renderers[format](), nl=False)
+
+
+@app.command()
+def validate(
+    config: ConfigOption = None,
+    track: Annotated[
+        str | None,
+        typer.Option("--track", help="Scope the skill checks to one track."),
+    ] = None,
+) -> None:
+    """Check the config and every track skill statically. Exit 1 on any error."""
+    log.configure()
+    report = admission.validate(_config_path(config), only=track)
+    for error in report.errors:
+        output.error(error)
+    for line in report.summary:
+        typer.echo(line, err=True)
+    for warning in report.warnings:
+        typer.echo(typer.style("warning: ", fg=output.DRY_RUN) + warning, err=True)
+    logger.info(
+        "validated",
+        extra={"errors": len(report.errors), "warnings": len(report.warnings)},
+    )
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command(name="doctor")
+def doctor_command(
+    config: ConfigOption = None,
+    track: Annotated[
+        str | None,
+        typer.Option("--track", help="Probe one track's source instead of all of them."),
+    ] = None,
+) -> None:
+    """Probe the deployment: credentials, queries, harness, executor, control. Read-only."""
+    log.configure()
+    checks = doctor.diagnose(_config_path(config), only=track)
+    for check in checks:
+        output.check(check.name, check.ok, check.detail)
+        logger.info("doctor", extra={"check": check.name, "ok": check.ok, "detail": check.detail})
+    if not all(check.ok for check in checks):
+        raise typer.Exit(code=1)
 
 
 @contextmanager
@@ -137,10 +258,11 @@ def _exit_on_tina_error(command: str) -> Iterator[None]:
 def dispatch_track(
     config: Config,
     track_name: str,
-    limit: int,
+    limit: int | None = None,
     source: Source | None = None,
     executor: Executor | None = None,
     dry_run: bool = False,
+    governor: Governor | None = None,
 ) -> None:
     """Query, take up to the effective limit, enqueue one worker each.
 
@@ -161,10 +283,17 @@ def dispatch_track(
     fails at config load, whichever mode this runs in. Having no executor, it
     also cannot count in-flight workers, so it assumes zero and says so.
 
-    The budget is `max(0, min(--limit, policy) − in flight)` (ADR-016): the
-    limit caps live workers, not launches per call, or a 15-minute scheduler
+    The budget is `max(0, ceiling − in flight)` (ADR-016), where the ceiling
+    is the lowest of `--limit`, the track's own `max_concurrency`, and the
+    control file's — except that a track declaring its own cap opted out of
+    the control file's knob, so only `--limit` lowers it further. The ceiling
+    caps live workers, not launches per call, or a 15-minute scheduler
     multiplies the knob by every hour a worker runs. Items already in flight
     are skipped rather than re-enqueued — the dedupe `claim = "none"` needs.
+
+    A `governor`, when the deployment supplies one, may lower the ceiling
+    further for this cycle and is told what the cycle did afterwards. Tina
+    ships none; a governor that raises is treated as absent for the cycle.
     """
     track = config.track(track_name)
     _require_enabled(config, track)
@@ -177,7 +306,7 @@ def dispatch_track(
         _dispatch_sweep(config, track, policy, executor, dry_run)
         return
 
-    effective, limit_origin = _effective_limit(limit, policy)
+    effective, limit_origin = _effective_limit(limit, track, policy)
     source = source or sources.build(track)
     if dry_run:
         items = source.query(track.query)[: max(effective, 0)]
@@ -186,15 +315,17 @@ def dispatch_track(
 
     executor = executor or executors.build(config)
     in_flight = executor.running(track.name)
-    budget = max(0, effective - len(in_flight))
+    cap, cap_origin = _governed(governor, track.name, effective, len(in_flight), limit_origin)
+    budget = max(0, cap - len(in_flight))
     items = source.query(track.query)
     logger.info(
         "dispatching",
         extra={
             "track": track.name,
             "limit": limit,
-            "effective_limit": effective,
-            "limit_origin": limit_origin,
+            "effective_limit": cap,
+            "limit_origin": cap_origin,
+            "ceiling": effective,
             "in_flight": len(in_flight),
             "budget": budget,
             "matched": len(items),
@@ -211,6 +342,43 @@ def dispatch_track(
         executor.enqueue(track.name, item.id)
         logger.info("enqueued", extra=_item_fields(track.name, item, config.executor))
         launched += 1
+    _report_to_governor(
+        governor,
+        track.name,
+        ceiling=effective,
+        cap=cap,
+        in_flight=len(in_flight),
+        budget=budget,
+        matched=len(items),
+        launched=launched,
+    )
+
+
+def _governed(
+    governor: Governor | None, track: str, ceiling: int, in_flight: int, origin: str
+) -> tuple[int, str]:
+    """The governor's cap for the cycle, clamped to the ceiling, or the ceiling."""
+    if governor is None:
+        return ceiling, origin
+    try:
+        cap = governor.cap(track, ceiling, in_flight)
+    except Exception as exc:
+        logger.warning(
+            "governor failed; using the ceiling", extra={"track": track, "error": str(exc)}
+        )
+        return ceiling, origin
+    if cap is None or cap >= ceiling:
+        return ceiling, origin
+    return max(cap, 0), "governor"
+
+
+def _report_to_governor(governor: Governor | None, track: str, **facts: int) -> None:
+    if governor is None:
+        return
+    try:
+        governor.record(track, **facts)
+    except Exception as exc:
+        logger.warning("governor record failed", extra={"track": track, "error": str(exc)})
 
 
 def _require_enabled(config: Config, track: TrackConfig) -> None:
@@ -226,15 +394,29 @@ def _require_enabled(config: Config, track: TrackConfig) -> None:
         )
 
 
-def _effective_limit(limit: int, policy: control.LoadedPolicy) -> tuple[int, str]:
-    """`min(--limit, max_concurrency)`: the control file can only lower the cap.
+def _effective_limit(
+    limit: int | None, track: TrackConfig, policy: control.LoadedPolicy
+) -> tuple[int, str]:
+    """The cap on live workers and which knob set it.
 
-    The origin names which bound won, so a cycle that launched fewer workers
-    than expected is explainable from the dispatch record alone.
+    A track's own `max_concurrency` wins over the control file's: the file is
+    the fleet knob, and a track that declares its own throughput opted out of
+    it (`paused` still stops it). `--limit` can only lower whichever applies.
+    With nothing set anywhere, `DEFAULT_LIMIT`. The origin names which bound
+    won, so a cycle that launched fewer workers than expected is explainable
+    from the dispatch record alone.
     """
-    if policy.max_concurrency is not None and policy.max_concurrency < limit:
-        return policy.max_concurrency, "max_concurrency"
-    return limit, "--limit"
+    if track.max_concurrency is not None:
+        ceiling, origin = track.max_concurrency, "track max_concurrency"
+    elif policy.max_concurrency is not None:
+        ceiling, origin = policy.max_concurrency, "max_concurrency"
+    else:
+        ceiling, origin = None, "default"
+    if limit is not None and (ceiling is None or limit < ceiling):
+        return limit, "--limit"
+    if ceiling is None:
+        return DEFAULT_LIMIT, origin
+    return ceiling, origin
 
 
 def _paused_dispatch(track: TrackConfig, policy: control.LoadedPolicy, dry_run: bool) -> None:
@@ -367,7 +549,7 @@ def _preview(
     config: Config,
     track: TrackConfig,
     items: list[WorkItem],
-    limit: int,
+    limit: int | None,
     effective: int,
     limit_origin: str,
     policy: control.LoadedPolicy,
@@ -449,11 +631,16 @@ def run_item(
     source: Source | None = None,
     executor: Executor | None = None,
     dry_run: bool = False,
+    model: str | None = None,
 ) -> RunRecord | None:
     """Claim one item, run the agent once, verify, record.
 
     `item_id` is required exactly when the track has a queue: a sweep track
     takes none and refuses one, since there is no source to fetch it from.
+
+    `model` runs this one execution on a model other than the track's own —
+    for trying a model out without editing the config. It is subject to the
+    same rule as the track's: the harness command must reference `{model}`.
 
     Returns the record it logged. Every agent outcome is a successful run — the
     outcome is data, not a process failure — so this never signals via an
@@ -469,7 +656,7 @@ def run_item(
     from describing it.
     """
     started = time.monotonic()
-    track = config.track(track_name)
+    track = _with_model(config, config.track(track_name), model)
     _require_enabled(config, track)
 
     if track.mode == "sweep":
@@ -537,6 +724,24 @@ def run_item(
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)
     _write_back(track, source, item, record)
     return record
+
+
+def _with_model(config: Config, track: TrackConfig, model: str | None) -> TrackConfig:
+    """The track with a one-run model override applied, validated like the
+    track's own: whitespace is rejected, and the harness must reference
+    `{model}` or the override would silently never reach it."""
+    if model is None:
+        return track
+    if not model.strip() or any(c.isspace() for c in model):
+        raise ConfigError(f"--model {model!r} must be non-empty and contain no whitespace")
+    if not config.harness_config().command.uses("model"):
+        raise ConfigError(
+            f"{config.path}: --model given but harness {config.harness!r} never references"
+            " {model}",
+            fix="Add {model} to the harness command, or drop --model.",
+        )
+    logger.info("model override", extra={"track": track.name, "model": model, "own": track.model})
+    return track.model_copy(update={"model": model})
 
 
 def _run_sweep(
