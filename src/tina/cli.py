@@ -225,10 +225,21 @@ def doctor_command(
         str | None,
         typer.Option("--track", help="Probe one track's source instead of all of them."),
     ] = None,
+    skip_models: Annotated[
+        bool,
+        typer.Option(
+            "--skip-models",
+            help="Do not run the harness once per listed model (each probe is one model call).",
+        ),
+    ] = False,
 ) -> None:
-    """Probe the deployment: credentials, queries, harness, executor, control. Read-only."""
+    """Probe the deployment: credentials, queries, harness, models, executor, control.
+
+    Writes nothing to any tracker. The model probes run the harness with a
+    trivial prompt, one per model in `models`.
+    """
     log.configure()
-    checks = doctor.diagnose(_config_path(config), only=track)
+    checks = doctor.diagnose(_config_path(config), only=track, probe_models=not skip_models)
     for check in checks:
         output.check(check.name, check.ok, check.detail)
         logger.info("doctor", extra={"check": check.name, "ok": check.ok, "detail": check.detail})
@@ -640,7 +651,8 @@ def run_item(
 
     `model` runs this one execution on a model other than the track's own —
     for trying a model out without editing the config. It is subject to the
-    same rule as the track's: the harness command must reference `{model}`.
+    same rules as the track's: the harness command must reference `{model}`,
+    and the model must be in `models` when the deployment lists any.
 
     Returns the record it logged. Every agent outcome is a successful run — the
     outcome is data, not a process failure — so this never signals via an
@@ -739,6 +751,13 @@ def _with_model(config: Config, track: TrackConfig, model: str | None) -> TrackC
             f"{config.path}: --model given but harness {config.harness!r} never references"
             " {model}",
             fix="Add {model} to the harness command, or drop --model.",
+        )
+    if not config.allows_model(model):
+        raise ConfigError(
+            f"{config.path}: --model {model!r} is not in `models`"
+            f" (listed: {', '.join(config.models)})",
+            fix="The override skips the track's choice, not the deployment's list; add the model"
+            " to `models` once the provider serves it here.",
         )
     logger.info("model override", extra={"track": track.name, "model": model, "own": track.model})
     return track.model_copy(update={"model": model})

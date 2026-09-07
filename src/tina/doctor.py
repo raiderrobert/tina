@@ -2,12 +2,17 @@
 
 `tina validate` reads files. `tina doctor` talks to the systems: every source a
 track uses authenticates and its query parses, the harness binary is on PATH,
-the executor can be constructed, and the control file — if one is configured
-— loads without failing closed. The first-run failure mode for a new user is
-otherwise a stack trace from whichever adapter happened to be called first,
-after they have already written a config and a track.
+the executor can be constructed, the control file — if one is configured —
+loads without failing closed, and every model the deployment lists answers
+through the harness. The first-run failure mode for a new user is otherwise a
+stack trace from whichever adapter happened to be called first, after they
+have already written a config and a track.
 
-Every check is read-only. Nothing is claimed, enqueued, or run.
+Every check is read-only against the trackers: nothing is claimed, enqueued,
+or written back. The model probes do run the harness — one trivial prompt per
+model, which costs one small model call each — because a model the provider
+does not serve fails every run of the track that names it, from inside the
+harness. `probe_models=False` skips them.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from tina import control, executors, sources
+from tina import control, executors, harness, sources
 from tina.config import Config, ConfigError
 from tina.config import load as load_config
 from tina.errors import TinaError
@@ -44,6 +49,7 @@ def diagnose(
     tracks_dir: Path | str | None = None,
     control: Path | str | None = None,
     artifacts_dir: Path | str | None = None,
+    probe_models: bool = True,
 ) -> list[Check]:
     """Run every probe against the config and return the verdicts in order.
 
@@ -60,9 +66,12 @@ def diagnose(
     except ConfigError as exc:
         return [Check("config loads", False, str(exc))]
     checks = [Check("config loads", True, str(config.path))]
-    checks.extend(_harness(config))
+    harness_checks = list(_harness(config))
+    checks.extend(harness_checks)
     checks.append(_executor(config))
     checks.append(_control(config))
+    if probe_models and all(check.ok for check in harness_checks):
+        checks.extend(_models(config))
     tracks = config.tracks.values()
     if only is not None:
         try:
@@ -83,6 +92,27 @@ def _harness(config: Config) -> Iterator[Check]:
         found is not None,
         found or f"{binary!r} not found; the worker image must install it",
     )
+
+
+def _models(config: Config) -> Iterator[Check]:
+    """Every model the deployment lists answers through the harness.
+
+    With no `models` list, the distinct models the tracks name are probed
+    instead; with a harness that takes no `{model}`, the harness itself is
+    probed once. A probe is the real command and the real outcome contract
+    with a prompt whose only job is to be answered.
+    """
+    harness_config = config.harness_config()
+    if not harness_config.command.uses("model"):
+        result = harness.probe(harness_config, None)
+        yield Check(f"harness {harness_config.name!r} answers", result.ok, result.detail)
+        return
+    models = config.models or sorted(
+        {track.model for track in config.tracks.values() if track.model is not None}
+    )
+    for model in models:
+        result = harness.probe(harness_config, model)
+        yield Check(f"model {model!r} answers", result.ok, result.detail)
 
 
 def _executor(config: Config) -> Check:

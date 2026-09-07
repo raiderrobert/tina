@@ -788,3 +788,47 @@ def test_an_override_wins_over_the_environment_and_the_file(
     cfg = config.load(write(tmp_path, text), tracks_dir="/from/caller")
 
     assert cfg.tracks_dir == Path("/from/caller")
+
+
+# --- the models list ----------------------------------------------------------------
+
+MODELLED = """
+harness = "pi"
+models = ["fast", "frontier"]
+
+[harnesses.pi]
+command = ["pi", "-p", "@{prompt_file}", "--model", "{model}"]
+
+[vul]
+source = "jira"
+query = "project = VUL"
+model = "frontier"
+"""
+
+
+def test_a_tracks_model_must_be_listed_when_models_is_set(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODELLED))
+    assert cfg.models == ["fast", "frontier"]
+    assert cfg.allows_model("fast") and not cfg.allows_model("other")
+
+    with pytest.raises(config.ConfigError, match="'other' is not in `models`"):
+        config.load(write(tmp_path, MODELLED.replace('model = "frontier"', 'model = "other"')))
+
+
+def test_no_models_list_means_unconstrained(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODELLED.replace('models = ["fast", "frontier"]\n', "")))
+    assert cfg.models == []
+    assert cfg.allows_model("anything")
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('models = ["fast", "fast"]', "listed twice"),
+        ('models = ["a b"]', "no whitespace"),
+        ('models = [""]', "non-empty"),
+    ],
+)
+def test_models_entries_are_validated(tmp_path: Path, value: str, message: str) -> None:
+    with pytest.raises(config.ConfigError, match=message):
+        config.load(write(tmp_path, MODELLED.replace('models = ["fast", "frontier"]', value)))

@@ -54,7 +54,9 @@ PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir", "model", "session_dir"})
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 
 # Top-level scalars, as opposed to tables that define adapters or tracks.
-_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control", "artifacts_dir"})
+_SCALAR_KEYS = frozenset(
+    {"harness", "executor", "tracks_dir", "control", "artifacts_dir", "models"}
+)
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
 
 #: Environment overrides for the top-level paths. One image, many mounts.
@@ -400,6 +402,14 @@ class Config(BaseModel):
     path: Path
     harness: str
     executor: str = "local"
+    # The models the harness may run, as the exact strings `{model}` takes.
+    # Empty means unconstrained. When set, every track's `model` and every
+    # `run --model` override must be one of them: a model the provider does
+    # not serve this deployment fails every run of the track that names it,
+    # from inside the harness where nobody is looking. The list is the one
+    # place that says which models this deployment has enabled — and what a
+    # live probe (`doctor`) has to prove answers.
+    models: list[str] = Field(default_factory=list)
     tracks_dir: Path = Path("tracks")
     # Where the control file lives, when the deployment does not use
     # TINA_CONTROL. None means no control plane configured here.
@@ -413,6 +423,22 @@ class Config(BaseModel):
 
     def harness_config(self) -> HarnessConfig:
         return self.harnesses[self.harness]
+
+    @field_validator("models")
+    @classmethod
+    def _check_models(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for model in value:
+            if not model or any(c.isspace() for c in model):
+                raise ValueError(f"model {model!r} must be non-empty and contain no whitespace")
+            if model in seen:
+                raise ValueError(f"model {model!r} is listed twice")
+            seen.add(model)
+        return value
+
+    def allows_model(self, model: str) -> bool:
+        """Whether `model` may run here: listed, or nothing is listed."""
+        return not self.models or model in self.models
 
     def track(self, name: str) -> TrackConfig:
         """The track table named, matched case-insensitively.
@@ -546,6 +572,7 @@ def parse(
             "artifacts_dir": artifacts_dir
             or os.environ.get(ARTIFACTS_DIR_VAR)
             or raw.get("artifacts_dir"),
+            "models": raw.get("models", []),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
             "tracks": tracks,
@@ -626,11 +653,14 @@ def _validate_names(config: Config) -> None:
 
 
 def _validate_model(config: Config) -> None:
-    """Both mismatch directions between {model} and the track key fail at load.
+    """Both mismatch directions between {model} and the track key fail at load,
+    and so does a model the deployment has not listed.
 
     A command referencing {model} with no track value would run the agent with
     the literal `{model}` as an argument; a track value under a command that
-    never references it would silently not reach the harness.
+    never references it would silently not reach the harness; a track naming
+    a model outside `models` would fail every run at minute one of the
+    harness, with the error surfacing where nobody is looking.
     """
     uses_model = config.harness_config().command.uses("model")
     for track in config.tracks.values():
@@ -643,4 +673,10 @@ def _validate_model(config: Config) -> None:
             raise ConfigError(
                 f"{config.path}: [{track.name}]: model is set but harness"
                 f" {config.harness!r} never references {{model}}"
+            )
+        if track.model is not None and not config.allows_model(track.model):
+            raise ConfigError(
+                f"{config.path}: [{track.name}]: model {track.model!r} is not in `models`"
+                f" (listed: {', '.join(config.models)})",
+                fix="Add it to the top-level `models` list once the provider serves it here.",
             )

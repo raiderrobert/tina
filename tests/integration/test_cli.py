@@ -2249,7 +2249,7 @@ def test_doctor_reports_each_probe_and_exits_on_a_failure(
 
     wire(monkeypatch, Probe(items("VUL-1")))
 
-    result = runner.invoke(cli.app, ["doctor", "--config", str(project)])
+    result = runner.invoke(cli.app, ["doctor", "--config", str(project), "--skip-models"])
     err = plain(result.stderr)
 
     assert "✓ config loads" in err
@@ -2265,7 +2265,27 @@ def test_doctor_fails_when_a_probe_fails(project: Path, monkeypatch: pytest.Monk
 
     wire(monkeypatch, Refusing(items("VUL-1")))
 
-    result = runner.invoke(cli.app, ["doctor", "--config", str(project)])
+    result = runner.invoke(cli.app, ["doctor", "--config", str(project), "--skip-models"])
 
     assert result.exit_code == 1
     assert "✗ [vul] jira credentials — jira: 401 Rotate the token." in plain(result.stderr)
+
+
+def test_a_model_override_must_be_in_the_models_list(
+    modelled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override skips the track's choice, not the deployment's list."""
+    modelled.write_text(
+        modelled.read_text().replace('harness = "fake"', 'harness = "fake"\nmodels = ["own-model"]')
+    )
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    refused = runner.invoke(
+        cli.app,
+        ["run", "--track", "vul", "--item", "VUL-1", "--config", str(modelled), "--model", "trial"],
+    )
+    assert refused.exit_code == 1
+    assert "'trial' is not in `models`" in plain(refused.stderr)
+
+    record = cli.run_item(config.load(modelled), "vul", "VUL-1", model="own-model")
+    assert record is not None
