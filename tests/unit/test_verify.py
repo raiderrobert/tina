@@ -134,3 +134,94 @@ def test_a_lookalike_host_does_not_get_the_token(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
 
     assert verify.auth_headers("https://github.com.evil.test/acme/api") == {}
+
+
+# --- web URLs are checked through the API they describe -----------------------
+
+
+@pytest.mark.parametrize(
+    ("web", "api"),
+    [
+        (
+            "https://github.com/acme/api/pull/7",
+            "https://api.github.com/repos/acme/api/issues/7",
+        ),
+        (
+            "https://github.com/acme/api/issues/629",
+            "https://api.github.com/repos/acme/api/issues/629",
+        ),
+        (
+            "https://github.com/acme/api/issues/629#issuecomment-5575080102",
+            "https://api.github.com/repos/acme/api/issues/comments/5575080102",
+        ),
+        (
+            "https://github.com/acme/api/pull/7#issuecomment-1",
+            "https://api.github.com/repos/acme/api/issues/comments/1",
+        ),
+        (
+            "https://github.com/acme/api/pull/7#discussion_r99",
+            "https://api.github.com/repos/acme/api/pulls/comments/99",
+        ),
+        (
+            "https://github.com/acme/api/commit/0123abcd",
+            "https://api.github.com/repos/acme/api/commits/0123abcd",
+        ),
+        (
+            "https://github.com/acme/api/releases/tag/v1.2.3",
+            "https://api.github.com/repos/acme/api/releases/tags/v1.2.3",
+        ),
+        ("https://github.com/acme/api", "https://api.github.com/repos/acme/api"),
+    ],
+)
+def test_github_web_urls_map_to_the_api(web: str, api: str) -> None:
+    assert verify.api_url(web) == api
+
+
+def test_unrecognized_github_paths_pass_through() -> None:
+    url = "https://github.com/acme/api/blob/main/README.md"
+    assert verify.api_url(url) == url
+
+
+def test_github_enterprise_uses_the_configured_api_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghe.example/api/v3")
+    assert (
+        verify.api_url("https://github.com/acme/api/pull/7")
+        == "https://ghe.example/api/v3/repos/acme/api/issues/7"
+    )
+
+
+def test_jira_browse_maps_to_the_issue_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JIRA_BASE_URL", "https://acme.atlassian.net")
+    assert (
+        verify.api_url("https://acme.atlassian.net/browse/VUL-1")
+        == "https://acme.atlassian.net/rest/api/3/issue/VUL-1"
+    )
+    other = "https://other.atlassian.net/browse/VUL-1"
+    assert verify.api_url(other) == other, "only the configured site is ours to translate"
+
+
+def test_verification_fetches_the_api_resource_with_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A private repository's pull request page is a 404 to any token; the
+    API resource is what the credentials reach."""
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), request.headers.get("Authorization", "")))
+        return httpx.Response(200 if request.url.host == "api.github.com" else 404)
+
+    result = verify.verify(
+        report(OutcomeStatus.RESOLVED, "https://github.com/acme/api/pull/7"), client(handler)
+    )
+
+    assert result.verified is True
+    assert seen == [("https://api.github.com/repos/acme/api/issues/7", "Bearer ghp_x")]
+
+
+def test_gh_token_is_accepted_for_github_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghp_cli")
+    assert verify.auth_headers("https://api.github.com/repos/a/b") == {
+        "Authorization": "Bearer ghp_cli"
+    }
