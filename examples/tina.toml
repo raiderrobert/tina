@@ -20,13 +20,20 @@ tracks_dir = "tracks"
 # control = "/mnt/config/control.toml"
 
 [harnesses.pi]
-command = ["pi", "--prompt-file", "{prompt_file}"]
+command = ["pi", "-p", "@{prompt_file}"]
 # A command may also reference {model}; every track must then set `model`,
 # so each track picks the model its work deserves:
-# command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]
+# command = ["pi", "-p", "@{prompt_file}", "--model", "{model}"]
 # And {session_dir}: a fresh directory per run where the harness writes its
 # session, captured to artifacts_dir when that is set:
-# command = ["pi", "--prompt-file", "{prompt_file}", "--session-dir", "{session_dir}"]
+# command = ["pi", "-p", "@{prompt_file}", "--session-dir", "{session_dir}"]
+# Output markers that mean "the failure clears on its own — run it again",
+# each with a ladder of waits (one retry per entry). Most specific first: the
+# first rule that matches decides the schedule.
+# retry = [
+#   { markers = ["Quota exceeded"], waits = [60, 300, 600], reason = "provider quota" },
+#   { markers = ["overloaded_error", "RESOURCE_EXHAUSTED"], waits = [30, 120], reason = "capacity" },
+# ]
 
 [harnesses.claude]
 command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
@@ -35,6 +42,8 @@ command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
 project = "acme-prod"
 region = "us-central1"
 job = "tina-worker"
+# Or one job per track, so each gets its own machine size and timeout:
+# job = "tina-{track}"
 
 # Every other table is a track: source -> skill -> result.
 
@@ -43,6 +52,8 @@ source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
 track = "remediate"         # skill name under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only — the agent produces it
+# max_concurrency = 4         # this track's cap on live workers. Opts out of the
+#                             # control file's max_concurrency; paused still applies.
 # model = "claude-sonnet-x"   # substituted for {model} in the harness command;
 #                             # required exactly when the command references it
 # claim = "assign"            # how the worker claims (ADR-014): "assign" the
@@ -62,6 +73,20 @@ result = "github:pr"        # declaration only — the agent produces it
 # The query must exclude it, or blocked items match again. Jira:
 #   AND (labels IS EMPTY OR labels != "tina-blocked")
 # GitHub: -label:tina-blocked
+# blocked_transition = "Blocked"  # jira only: block() transitions to this
+#                             # status instead; the query's status clause
+#                             # already excludes it.
+
+# Instead of `query`, a track may give the parts and let tina build it —
+# the queued status, unassigned, not blocked, not claimed, oldest first are
+# then tina's job, and onboarding a team is one array edit:
+# [vul-by-team]
+# source = "jira"
+# project = "VUL"
+# status = "Open"                       # the default
+# extra = "labels not in (wontfix)"
+# [vul-by-team.filters]
+# Team = ["Payments", "Search"]
 
 [bug]
 source = "github"
@@ -69,6 +94,8 @@ repo = "acme/api"
 query = "repo:acme/api is:issue is:open no:assignee label:bug"
 track = "triage"
 result = "github:issue-comment"
+# The structured form of the same track:
+# labels = ["bug"]            # instead of query; repo is required either way
 
 # Optional: literal strings merged over the inherited environment for the
 # harness subprocess only — how a track skill's scripts get configured.

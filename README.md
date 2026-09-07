@@ -40,16 +40,16 @@ This approach scales your attention better than having 5 simultaneous agent sess
 A track is `Source -> Skill -> Result`.
 
 ```toml
-harness = "pi"      
+harness = "pi"
 executor = "local"
 
 [harnesses.pi]
-command = ["pi", "--prompt-file", "{prompt_file}"]
+command = ["pi", "-p", "@{prompt_file}"]
 
 [bug]
 source = "github"
 repo = "acme/api"
-query = "repo:acme/api is:issue is:open no:assignee label:bug"
+labels = ["bug"]            # or the full query = "repo:acme/api is:issue ..."
 track = "triage"
 result = "github:issue-comment"
 ```
@@ -57,9 +57,11 @@ result = "github:issue-comment"
 A basic workflow:
 
 ```bash
-tina dispatch --track bug --limit 5            
-tina run --track bug --item 4821             
-tina status --track bug              
+tina validate                        # the config and every skill, statically
+tina doctor                          # credentials, queries, harness, executor
+tina dispatch --track bug --limit 5
+tina run --track bug --item 4821
+tina status --track bug
 ```
 
 `status` derives both counts from the track's own `query` — once as `dispatch` runs
@@ -79,8 +81,14 @@ without Tina knowing about them.
   provides.
 - **No persistent state.** The tracker is the ledger. Workers claim items, and
   claimed items drop out of the query.
+- **Control plane in a file.** Pause and throttle live in a control file
+  read fresh every dispatch, so whoever holds the pager can stop the factory
+  without a deploy. Per-track `max_concurrency` and a governor seam sit
+  beside it.
 - **No tracks included.** Tracks are skills, installed with
   [napoln](https://github.com/raiderrobert/napoln) at image build time.
+  `tina tracks --format json` lists them so infrastructure can be derived
+  from the same file the runtime reads.
 
 ## Documentation
 

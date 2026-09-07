@@ -319,3 +319,31 @@ def test_cloudrun_running_stops_paging_at_the_horizon() -> None:
     executor = running_executor([*finished, live])
 
     assert executor.running("vul") == []
+
+
+# --- one job per track ------------------------------------------------------------
+
+
+def test_cloudrun_enqueue_substitutes_the_track_into_the_job_name() -> None:
+    client = FakeJobsClient()
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="factory-{track}"),
+        config_path="/etc/tina.toml",
+        client=client,
+    )
+
+    executor.enqueue("vul", "VUL-1")
+
+    (request,) = client.requests
+    assert request.name == "projects/p/locations/r/jobs/factory-vul"
+
+
+def test_cloudrun_running_lists_the_tracks_own_job() -> None:
+    executions = FakeExecutionsClient([FakeExecution(worker_args("vul", "VUL-1"))])
+    executor = CloudRunExecutor(
+        CloudRunOptions(project="p", region="r", job="factory-{track}"),
+        executions_client=executions,
+    )
+
+    assert executor.running("vul") == ["VUL-1"]
+    assert executions.parents == ["projects/p/locations/r/jobs/factory-vul"]

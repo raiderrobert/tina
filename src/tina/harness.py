@@ -11,14 +11,18 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from tina.config import HarnessConfig
+from tina.config import HarnessConfig, HarnessRetry
 from tina.log import get_logger
 from tina.models import OutcomeReport, OutcomeStatus
+from tina.scrub import scrub
 
 log = get_logger(__name__)
 
@@ -79,6 +83,7 @@ def run(
     timeout: float | None = None,
     model: str | None = None,
     env: dict[str, str] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> HarnessResult:
     """Write the prompt, run the harness once, read whatever it left behind.
 
@@ -88,6 +93,11 @@ def run(
 
     A command referencing {session_dir} gets a fresh directory per run; one
     that never references it gets no directory created at all.
+
+    "Once" is per the harness's retry rules: a nonzero exit whose output
+    carried a configured marker is re-run after the rule's wait, up to the
+    length of its ladder. A harness with no rules is run exactly once, with
+    its output inherited rather than relayed.
     """
     prompt_file = write_prompt(prompt, workdir)
 
@@ -99,12 +109,13 @@ def run(
     log.info("harness starting", extra={"harness": config.name, "command": command})
 
     try:
-        completed = subprocess.run(
+        returncode = _run_with_retries(
             command,
-            check=False,
-            cwd=workdir,
-            timeout=timeout if timeout is not None else default_timeout(),
-            env=os.environ | env if env else None,
+            workdir,
+            os.environ | env if env else None,
+            timeout if timeout is not None else default_timeout(),
+            config.retry,
+            sleep,
         )
     except subprocess.TimeoutExpired as exc:
         return HarnessResult(
@@ -125,12 +136,92 @@ def run(
             session_dir=session_dir,
         )
 
-    report = read_outcome(outcome_path(workdir), completed.returncode)
-    return HarnessResult(report=report, exit_code=completed.returncode, session_dir=session_dir)
+    report = read_outcome(outcome_path(workdir), returncode)
+    return HarnessResult(report=report, exit_code=returncode, session_dir=session_dir)
+
+
+def _run_with_retries(
+    command: list[str],
+    workdir: Path,
+    env: dict[str, str] | None,
+    timeout: float,
+    rules: list[HarnessRetry],
+    sleep: Callable[[float], None],
+) -> int:
+    """Run the command, re-running while its output names a retryable failure.
+
+    The first rule in configured order that matches the output decides the
+    wait — so a line carrying both a specific marker and a general one is
+    retried on the specific rule's schedule, and once that ladder is spent the
+    failure stands rather than falling through to the vaguer rule. A clean
+    exit, or one no rule matches, ends the loop.
+    """
+    if not rules:
+        return subprocess.run(
+            command, check=False, cwd=workdir, env=env, timeout=timeout
+        ).returncode
+
+    spent = [0] * len(rules)
+    while True:
+        returncode, output = _run_relaying(command, workdir, env, timeout)
+        if returncode == 0:
+            return returncode
+        # The first rule that matches decides — a spent ladder on that rule ends
+        # the loop rather than falling through to a vaguer rule further down.
+        index = next((i for i, rule in enumerate(rules) if rule.matches(output)), None)
+        if index is None or spent[index] >= len(rules[index].waits):
+            return returncode
+        wait = rules[index].waits[spent[index]]
+        spent[index] += 1
+        log.warning(
+            "harness failed on a retryable condition; retrying",
+            extra={"reason": rules[index].reason, "wait_seconds": wait, "exit_code": returncode},
+        )
+        sleep(wait)
+
+
+def _run_relaying(
+    command: list[str], workdir: Path, env: dict[str, str] | None, timeout: float
+) -> tuple[int, str]:
+    """Run the command with its output piped through to stderr, line by line.
+
+    Piped rather than inherited so the retry markers can be seen, and relayed
+    as it arrives so a log collector still gets the run as it happens instead
+    of one block at the end. Stderr, because stdout is Tina's JSON records.
+    """
+    lines: list[str] = []
+    with subprocess.Popen(
+        command,
+        cwd=workdir,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+    ) as proc:
+        try:
+            for line in proc.stdout or ():
+                sys.stderr.write(line)
+                sys.stderr.flush()
+                lines.append(line)
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise
+    return returncode, "".join(lines)
+
+
+#: Captured files whose text is scrubbed for credential shapes before it is
+#: stored. Everything else is copied byte for byte.
+SCRUBBED_SUFFIXES = frozenset({".jsonl", ".json", ".md", ".txt", ".log"})
 
 
 def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> None:
     """Copy the session directory's contents to `<artifacts_dir>/<item>/`.
+
+    Text files are scrubbed of credential material on the way (`tina.scrub`):
+    a transcript records tool output verbatim, and an agent that prints its
+    environment lands every token it holds in one.
 
     Best-effort: a failure is logged and never raised, because losing the
     evidence must not fail an otherwise-successful run. Either path being
@@ -139,7 +230,9 @@ def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> 
     if session_dir is None or artifacts_dir is None:
         return
     try:
-        shutil.copytree(session_dir, artifacts_dir / item, dirs_exist_ok=True)
+        shutil.copytree(
+            session_dir, artifacts_dir / item, dirs_exist_ok=True, copy_function=_copy_scrubbed
+        )
     except Exception as exc:
         log.warning(
             "artifact capture failed",
@@ -150,6 +243,16 @@ def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> 
                 "error": str(exc),
             },
         )
+
+
+def _copy_scrubbed(src: str, dst: str) -> None:
+    source = Path(src)
+    if source.suffix.lower() not in SCRUBBED_SUFFIXES:
+        shutil.copy2(src, dst)
+        return
+    Path(dst).write_text(
+        scrub(source.read_text(encoding="utf-8", errors="replace")), encoding="utf-8"
+    )
 
 
 def read_outcome(path: Path, exit_code: int) -> OutcomeReport:

@@ -24,17 +24,35 @@ Code, Gemini CLI, and others are supported through the same adapter contract.
 
 ## 3. Entrypoints
 
-Tina is a library with a CLI in front of it. Two subcommands:
+Tina is a library with a CLI in front of it. Two data-plane subcommands:
 
 ```
-tina dispatch --track vul --limit 5     # what the scheduler calls
+tina dispatch --track vul               # what the scheduler calls
 tina run --track vul --item VUL-123     # what the executor spawns; also local dev
 ```
 
-Both subcommands split their output by audience: stdout carries the structured
+and four control-plane ones ([ADR-011](adr/011-control-plane-data-plane-split.md)):
+
+```
+tina status --track vul                 # introspection: queued and in flight
+tina tracks [--format json]             # introspection: what is configured
+tina config-options [--format markdown] # introspection: every track key, from the schema
+tina validate                           # admission: config and every skill, statically
+tina doctor                             # admission: credentials, queries, harness, executor
+```
+
+Every subcommand splits its output by audience: stdout carries the structured
 JSON log — one object per line, including the error record when a run fails —
 and stderr carries the human-readable `✗ message / Cause: / Fix:` block, so a
-collector parsing stdout never has prose to skip.
+collector parsing stdout never has prose to skip. `tracks` and
+`config-options` are the exception: their whole output is data, on stdout, so
+infrastructure and docs can be derived from it.
+
+`--config` defaults to `$TINA_CONFIG`, then `tina.toml` in the working
+directory. `TINA_TRACKS_DIR` and `TINA_ARTIFACTS_DIR` override the config's
+paths the same way `TINA_CONTROL` does, so one image runs against a config
+mounted anywhere. `run --model` runs one execution on a model other than the
+track's own, for trying one out without editing the config.
 
 Tina does not own scheduling. There is no open standard for declaring a schedule
 that targets native cloud schedulers, and cron dialects are not even portable
@@ -76,6 +94,35 @@ One track can produce different results per run: the vulnerability track
 ends in a PR link or a discovery comment depending on what it finds. Results are
 not 1:1 with tracks.
 
+### Structured query inputs
+
+Most tracks are one query shape where a list changes: a project plus the set
+of opted-in teams, a repo plus a label set. A track may give the parts instead
+of the query, and Tina builds it (`tina.query`):
+
+```toml
+[vul]
+source = "jira"
+project = "VUL"
+extra = "labels not in (wontfix)"
+[vul.filters]
+Team = ["Payments", "Search"]     # onboarding a team is one line
+
+[smoke]
+source = "github"
+repo = "acme/api"
+labels = ["needs-triage"]
+```
+
+The builder owns the invariants every track would otherwise re-type into every
+query string: the queued status, unassigned, not blocked, not claimed, oldest
+first. Under `claim = "assign"` with a `claim_transition`, bot-held items still
+in the queued status are offered back — the transition, not the assignee, is
+what excludes an item, so one still queued was reopened upstream. Every value
+interpolated is validated at load (charset, shape): a team name with a quote
+in it is at best a broken query. `query` remains the full override for
+anything that does not fit; a track may not set both.
+
 ### Sweep tracks
 
 Not every useful track has a queue: scan recent job executions and file an
@@ -103,8 +150,8 @@ Two roles, one image.
 jobs through an executor. It never runs an agent.
 
 N is a budget over live workers, not launches per call:
-`max(0, min(--limit, max_concurrency) − in flight)`, where in flight is what
-the executor's `running()` reports for the track
+`max(0, ceiling − in flight)`, where in flight is what the executor's
+`running()` reports for the track
 ([ADR-016](adr/016-dispatch-budgets-by-live-executor-state.md)). Without the
 subtraction, a 15-minute scheduler launching the full limit against hour-long
 runs multiplies the knob by four to twelve. Items already in flight are
@@ -114,6 +161,23 @@ queried fresh each cycle and never stored; the same gate holds a sweep
 dispatch while its one worker is still out. A dry run builds no executor, so
 it assumes zero in flight and says so when that is an assumption rather than
 a fact.
+
+The ceiling comes from three knobs, each at a different tier. The track's own
+`max_concurrency` is declaration: a track that sets one has opted out of the
+fleet knob, and only `paused` still stops it. Otherwise the control file's
+`max_concurrency` applies — policy, changed without a deploy. `--limit` on
+the command line can only lower whichever of those applies. With none of the
+three set, the ceiling is 1. The dispatch record names which knob won, so a
+cycle that launched fewer workers than expected is explainable from the log.
+
+A deployment may also hand `dispatch_track` a **governor**
+([ADR-017](adr/017-governor-seam.md)): an object asked once per cycle for a
+lower cap, and told afterwards what the cycle did — the ceiling, the cap that
+applied, workers in flight, the budget, items matched, launches made. That is
+the seam for adaptive throughput — halve on a failure burst, climb on healthy
+deep-backlog cycles — reading signals Tina does not model. Tina ships no
+governor; it can only lower the ceiling, and one that raises is treated as
+absent for the cycle.
 
 **Worker** takes a single work item identifier, claims it, runs the agent once,
 and records the outcome. One item = one run = one container = one log stream.
@@ -240,7 +304,16 @@ query. All judgment about what the item actually is happens inside the track.
 | `claimed(q)` | `status` | the same query with its unclaimed clause inverted: what workers hold now |
 | `matches(item_id, q)` | worker | re-check the whole query against one item at worker start |
 | `claim(item)` | worker | mark the item as taken; fail if already claimed |
+| `annotate(item, comment)`, `block(item)` | worker | lifecycle write-back after a bad run (§15) |
+| `login()` | `doctor` | one authenticated read — who the credentials act as — and nothing else |
 | `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
+
+Credentials come from the environment: `JIRA_BASE_URL`, `JIRA_EMAIL`,
+`JIRA_API_TOKEN`; `GITHUB_TOKEN`, or `GH_TOKEN` — the GitHub CLI's spelling —
+when that is what the image already carries. The bot's own identity is
+configured (`JIRA_BOT_ACCOUNT_ID`, `GITHUB_BOT_LOGIN`) or looked up once from
+the credentials (`/myself`, `/user`), so a deployment that rotates the bot
+account changes one secret and nothing else.
 
 `matches` is the eligibility re-check: between dispatch and worker start an
 item can be assigned, closed, labeled, or worked by a human, and only the
@@ -359,7 +432,7 @@ config rather than a code plugin:
 harness = "pi"                  # which one to use
 
 [harnesses.pi]
-command = ["pi", "--prompt-file", "{prompt_file}"]
+command = ["pi", "-p", "@{prompt_file}"]
 
 [harnesses.claude]
 command = ["claude", "-p", "@{prompt_file}", "--output-format", "json"]
@@ -381,7 +454,21 @@ a few hundred lines are multi-file (`paths/`, `references/`, `scripts/`), the
 agent runs with its working directory set to the run's temp workdir, and
 without the anchor every relative reference in the skill resolves nowhere.
 `SKILL.md`'s leading YAML frontmatter is stripped before inlining — it is
-adapter metadata, not prompt content.
+adapter metadata, not prompt content. One token is substituted in the skill
+body: `$WORK_ITEM_ID` becomes the item's tracker identifier, so a router can
+open with "Work item: $WORK_ITEM_ID" without parsing the JSON block that
+follows. It is the only runner token; `tina validate` rejects any other bare
+`$TOKEN` in prose.
+
+A harness table may carry `retry` rules: output markers that mean the
+failure clears on its own — a model provider shedding load, a per-minute
+quota — and a ladder of waits, one retry per entry. Rules are tried in
+configured order, most specific first, and the first that matches decides the
+schedule; once its ladder is spent the failure stands. With rules set, the
+harness's output is relayed line by line so the markers can be seen — to
+stderr, since stdout is Tina's JSON records. Without rules the output is
+inherited and the harness runs exactly once. Tina still never *parses* that
+output for an outcome: a marker is a reason to run again, not a report.
 
 `{session_dir}` is where the harness leaves its session — the transcript, tool
 calls, and token costs the final message never shows. A command referencing it
@@ -394,7 +481,11 @@ is best-effort — a capture failure is logged and never fails the run — and t
 destination is just a path, so a bucket mount works with no cloud code in
 Tina, the same reasoning as the control file. `artifacts_dir` unset skips the
 copy silently; `{session_dir}` still substitutes, so one harness table works
-in both environments.
+in both environments. Text files are scrubbed of credential material on the
+way (`tina.scrub`): a transcript records tool output verbatim, and an agent
+that prints its environment lands every token it holds in one. Redaction is by
+shape — GitHub and Atlassian tokens, JWTs, Basic auth, PEM keys — so the
+scrubber holds no secrets of its own.
 
 **Tina does not parse harness stdout.** Each harness reports differently, and
 parsing per-harness output is where swappability rots. Instead Tina passes an
@@ -458,18 +549,19 @@ executor = "cloudrun"           # selects [executors.cloudrun]
 tracks_dir = "tracks"           # where napoln installed the skills
 
 [harnesses.pi]
-command = ["pi", "--prompt-file", "{prompt_file}"]
+command = ["pi", "-p", "@{prompt_file}"]
 
 [executors.cloudrun]
 project = "acme-prod"
 region = "us-central1"
-job = "tina-worker"
+job = "tina-{track}"        # {track} optional: one job per track, sized per track
 
 [vul]
 source = "jira"
 query = "project = VUL AND status = Open AND assignee IS EMPTY"
 track = "remediate"         # skill under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only
+max_concurrency = 4         # this track's cap on live workers; opts out of the fleet knob
 
 [bug]
 source = "github"
@@ -523,8 +615,11 @@ activity in the logs. Per track, `on_failure` decides:
 - `"leave"` (default) — the item is untouched and retried next cycle.
 - `"annotate"` — the worker comments the effective status, the agent's
   details, and the executor's log link on the item, then applies the source's
-  exclusion marker — a label, `tina-blocked` unless the track sets
-  `blocked_label` — so the configured query stops matching it.
+  exclusion marker so the configured query stops matching it. The marker is a
+  label, `tina-blocked` unless the track sets `blocked_label`; a Jira track may
+  instead set `blocked_transition`, and the item moves to that status — the
+  query's own `status =` clause excludes it, and humans find the item in the
+  workflow state they already watch.
 
 It triggers on *effective* status: `failed`, `needs_human`, and `resolved`
 that failed verification. Clean outcomes write nothing. The track query has to

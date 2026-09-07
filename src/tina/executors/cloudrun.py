@@ -72,6 +72,7 @@ class CloudRunExecutor:
 
     @property
     def job_path(self) -> str:
+        """The job with no track substituted — the configured template."""
         return self.options.job_path()
 
     def enqueue(self, track: str, item_id: str | None = None) -> None:
@@ -80,19 +81,20 @@ class CloudRunExecutor:
         if item_id is not None:
             args += ["--item", item_id]
         args += ["--config", self.config_path]
+        job = self.options.job_path(track)
         request = run_v2.RunJobRequest(
-            name=self.job_path,
+            name=job,
             overrides=run_v2.RunJobRequest.Overrides(
                 container_overrides=[run_v2.RunJobRequest.Overrides.ContainerOverride(args=args)]
             ),
         )
-        self._run_job(request)
+        self._run_job(request, job)
         log.info(
             "worker enqueued",
-            extra={"track": track, "item": item_id or "", "job": self.job_path},
+            extra={"track": track, "item": item_id or "", "job": job},
         )
 
-    def _run_job(self, request: Any) -> None:
+    def _run_job(self, request: Any, job: str) -> None:
         """Create the execution, retrying while the Admin API sheds load."""
         for wait in RUN_JOB_WAITS:
             try:
@@ -103,7 +105,7 @@ class CloudRunExecutor:
                     raise
                 log.warning(
                     "cloud run unavailable; retrying",
-                    extra={"job": self.job_path, "wait_seconds": wait},
+                    extra={"job": job, "wait_seconds": wait},
                 )
                 self._sleep(wait)
         self.client.run_job(request=request)
@@ -117,7 +119,7 @@ class CloudRunExecutor:
         someone else's business, and an item-less one is the sweep marker.
         """
         in_flight: list[str] = []
-        executions = self.executions_client.list_executions(parent=self.job_path)
+        executions = self.executions_client.list_executions(parent=self.options.job_path(track))
         for execution in itertools.islice(executions, RUNNING_HORIZON):
             if execution.completion_time:
                 continue

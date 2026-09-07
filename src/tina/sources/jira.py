@@ -6,6 +6,7 @@ being empty, then confirmed by re-reading the issue.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections.abc import Callable
@@ -29,6 +30,7 @@ log = get_logger(__name__)
 
 SEARCH_PATH = "/rest/api/3/search/jql"
 ISSUE_PATH = "/rest/api/3/issue"
+MYSELF_PATH = "/rest/api/3/myself"
 FIELDS = ["summary", "description", "assignee", "status", "labels"]
 
 #: Server errors get a short ladder. A rate limit is retried once, honoring
@@ -65,12 +67,17 @@ class User(BaseModel):
     account_id: str | None = Field(default=None, alias="accountId")
 
 
+class Status(BaseModel):
+    name: str = ""
+
+
 class IssueFields(BaseModel):
     summary: str = ""
     # Atlassian Document Format: a tree Tina flattens rather than models.
     description: Any = None
     assignee: User | None = None
     labels: list[str] = Field(default_factory=list)
+    status: Status | None = None
 
 
 class Issue(BaseModel):
@@ -97,8 +104,25 @@ class SearchResult(BaseModel):
 
 
 class Transition(BaseModel):
+    """One available workflow transition. `to` is the status it lands in —
+    what a track names, since transition names and status names differ."""
+
     id: str = ""
     name: str = ""
+    to: Status | None = None
+
+    def reaches(self, status: str) -> bool:
+        wanted = status.lower()
+        return self.name.lower() == wanted or (
+            self.to is not None and self.to.name.lower() == wanted
+        )
+
+
+class Myself(BaseModel):
+    """`GET /rest/api/3/myself` — who the credentials belong to."""
+
+    account_id: str = Field(default="", alias="accountId")
+    display_name: str = Field(default="", alias="displayName")
 
 
 class TransitionList(BaseModel):
@@ -119,15 +143,17 @@ class JiraSource:
         claim_policy: str = "assign",
         claim_label: str | None = None,
         claim_transition: str | None = None,
+        blocked_transition: str | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.base_url = (base_url or require_env("JIRA_BASE_URL", "jira")).rstrip("/")
         self._sleep = sleep
-        self._bot_account_id = bot_account_id
+        self._bot_account_id = bot_account_id or os.environ.get("JIRA_BOT_ACCOUNT_ID")
         self.blocked_label = blocked_label
         self.claim_policy = claim_policy
         self.claim_label = claim_label
         self.claim_transition = claim_transition
+        self.blocked_transition = blocked_transition
         if client is None:
             email = require_env("JIRA_EMAIL", "jira")
             token = require_env("JIRA_API_TOKEN", "jira")
@@ -136,9 +162,17 @@ class JiraSource:
 
     @property
     def bot_account_id(self) -> str:
-        if self._bot_account_id is None:
-            self._bot_account_id = require_env("JIRA_BOT_ACCOUNT_ID", "jira")
+        """Who we are. Configured, or looked up once from the credentials."""
+        if not self._bot_account_id:
+            me = parse_payload(Myself, self._request("GET", MYSELF_PATH), "jira", MYSELF_PATH)
+            self._bot_account_id = me.account_id
+            if not self._bot_account_id:
+                raise SourceError(f"jira: could not determine the bot account from {MYSELF_PATH}")
         return self._bot_account_id
+
+    def login(self) -> str:
+        """`GET /myself`: the credentials work, and this is who they act as."""
+        return self.bot_account_id
 
     def query(self, q: str) -> list[WorkItem]:
         request = SearchRequest(jql=q)
@@ -203,23 +237,24 @@ class JiraSource:
         """Move the claimed issue out of the queued status. Best-effort, like
         the other lifecycle writes: the claim already stands, and a stale
         status is the lesser bug than an assigned item left unworked."""
+        self._transition(item, str(self.claim_transition), "claim transition")
+
+    def _transition(self, item: WorkItem, target: str, what: str) -> None:
+        """Apply the transition named `target`, or the one landing in the
+        status named `target` — a track may spell either. Best-effort."""
         path = f"{ISSUE_PATH}/{item.id}/transitions"
         try:
             response = self._request("GET", path)
             available = parse_payload(TransitionList, response, "jira", path).transitions
-            wanted = str(self.claim_transition).lower()
-            match = next((t for t in available if t.name.lower() == wanted), None)
+            match = next((t for t in available if t.reaches(target)), None)
             if match is None:
-                log.warning(
-                    "claim transition not available",
-                    extra={"item": item.id, "transition": self.claim_transition},
-                )
+                log.warning(f"{what} not available", extra={"item": item.id, "transition": target})
                 return
             self._request("POST", path, json={"transition": {"id": match.id}})
         except SourceError as exc:
-            log.warning("claim transition failed", extra={"item": item.id, "error": str(exc)})
+            log.warning(f"{what} failed", extra={"item": item.id, "error": str(exc)})
             return
-        log.info("item transitioned", extra={"item": item.id, "transition": self.claim_transition})
+        log.info("item transitioned", extra={"item": item.id, "transition": target})
 
     def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
         """The `GET` half of `claim`, with the write that follows it left off.
@@ -271,11 +306,18 @@ class JiraSource:
         log.info("item annotated", extra={"item": item.id})
 
     def block(self, item: WorkItem) -> None:
-        """Add the exclusion label, `tina-blocked` unless the track overrides it.
+        """Move the item where the query stops matching it.
 
-        Jira's label add is a set add, so an already-blocked issue is a no-op
-        rather than an error. Best-effort, like `annotate`.
+        With `blocked_transition` set, that is a status transition — the
+        query's own `status =` clause excludes it, and humans find the item
+        in the workflow state they already watch. Otherwise the exclusion
+        label, `tina-blocked` unless the track overrides it: Jira's label add
+        is a set add, so an already-blocked issue is a no-op rather than an
+        error. Best-effort either way, like `annotate`.
         """
+        if self.blocked_transition:
+            self._transition(item, self.blocked_transition, "block transition")
+            return
         try:
             self._request(
                 "PUT",

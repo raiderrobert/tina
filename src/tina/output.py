@@ -11,6 +11,7 @@ from __future__ import annotations
 import typer
 
 ERROR = typer.colors.RED
+OK = typer.colors.GREEN
 DIM = typer.colors.BRIGHT_BLACK
 DRY_RUN = typer.colors.YELLOW
 
@@ -66,3 +67,12 @@ def counts(heading: str, tallies: dict[str, int]) -> None:
     typer.echo(typer.style(heading, bold=True) + "\n", err=True)
     for label, value in tallies.items():
         typer.echo(f"  {label}: {value}", err=True)
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    """One `tina doctor` verdict: a mark, the probe, and what it found."""
+    mark = typer.style("✓", fg=OK) if ok else typer.style("✗", fg=ERROR)
+    line = f"{mark} {name}"
+    if detail:
+        line += typer.style(f" — {detail}", fg=DIM)
+    typer.echo(line, err=True)
