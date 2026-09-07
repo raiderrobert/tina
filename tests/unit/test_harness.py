@@ -424,3 +424,14 @@ def test_capture_scrubs_credentials_from_text_artifacts(tmp_path: Path) -> None:
     assert (artifacts / "VUL-1" / "blob.bin").read_bytes() == token.encode(), (
         "binary passes through"
     )
+
+
+def test_capture_flattens_a_qualified_item_id(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "t.jsonl").write_text("{}\n")
+
+    harness.capture(session, tmp_path / "artifacts", "acme/api#42")
+
+    assert (tmp_path / "artifacts" / "acme__api#42" / "t.jsonl").is_file()
+    assert harness.artifact_name("VUL-1") == "VUL-1"

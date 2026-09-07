@@ -231,7 +231,10 @@ def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> 
         return
     try:
         shutil.copytree(
-            session_dir, artifacts_dir / item, dirs_exist_ok=True, copy_function=_copy_scrubbed
+            session_dir,
+            artifacts_dir / artifact_name(item),
+            dirs_exist_ok=True,
+            copy_function=_copy_scrubbed,
         )
     except Exception as exc:
         log.warning(
@@ -243,6 +246,12 @@ def capture(session_dir: Path | None, artifacts_dir: Path | None, item: str) -> 
                 "error": str(exc),
             },
         )
+
+
+def artifact_name(item: str) -> str:
+    """The directory an item's artifacts land in: the id, with path separators
+    flattened so `owner/name#42` is one directory rather than two."""
+    return item.replace("/", "__")
 
 
 def _copy_scrubbed(src: str, dst: str) -> None:
