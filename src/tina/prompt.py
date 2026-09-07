@@ -13,12 +13,15 @@ from tina.models import WorkItem
 
 SKILL_FILE = "SKILL.md"
 
-#: The one token Tina substitutes in skill prose: `$WORK_ITEM_ID` becomes the
-#: work item's tracker identifier. A skill that wants the item inline — "Work
-#: item: $WORK_ITEM_ID" at the top of a router — gets it without parsing the
-#: JSON block below. `tina validate` rejects any other bare `$TOKEN` in prose,
-#: since an unrecognised one reaches the model verbatim.
-WORK_ITEM_TOKEN = "$WORK_ITEM_ID"
+#: The one token Tina substitutes in skill prose: `$WORK_ITEM_KEY` becomes the
+#: work item's tracker key. A skill that wants the item inline — "Work item:
+#: $WORK_ITEM_KEY" at the top of a router — gets it without parsing the JSON
+#: block below. `tina validate` rejects any other bare `$TOKEN` in prose, since
+#: an unrecognised one reaches the model verbatim. "Key" rather than "id": a
+#: token is part of the prompt contract tracks are written against, and the
+#: tracks that exist call it the work-item key — a runner adapts to its
+#: prompt library, not the reverse.
+WORK_ITEM_TOKEN = "$WORK_ITEM_KEY"
 RUNNER_TOKENS = frozenset({WORK_ITEM_TOKEN.lstrip("$")})
 
 

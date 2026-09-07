@@ -759,3 +759,32 @@ def test_a_retry_rule_needs_markers_and_waits(tmp_path: Path) -> None:
 
     with pytest.raises(config.ConfigError, match="markers"):
         config.load(write(tmp_path, text))
+
+
+# --- overrides for library callers -----------------------------------------------
+
+
+def test_load_accepts_path_overrides_for_embedders(tmp_path: Path) -> None:
+    """A program embedding tina keeps its own environment contract and passes
+    the paths in; nothing here reads TINA_*."""
+    cfg = config.load(
+        write(tmp_path, MINIMAL),
+        tracks_dir="/app/skills",
+        control="/mnt/policy/control.toml",
+        artifacts_dir="/mnt/sessions",
+    )
+
+    assert cfg.track_dir(cfg.track("vul")) == Path("/app/skills/vul")
+    assert cfg.control_path() == Path("/mnt/policy/control.toml")
+    assert cfg.artifacts_path() == Path("/mnt/sessions")
+
+
+def test_an_override_wins_over_the_environment_and_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(config.TRACKS_DIR_VAR, "/from/env")
+    text = MINIMAL.replace('harness = "pi"', 'harness = "pi"\ntracks_dir = "from-file"', 1)
+
+    cfg = config.load(write(tmp_path, text), tracks_dir="/from/caller")
+
+    assert cfg.tracks_dir == Path("/from/caller")
