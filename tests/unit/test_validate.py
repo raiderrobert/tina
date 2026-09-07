@@ -26,7 +26,7 @@ description: Fix the vulnerability named by the work item.
 
 # Router
 
-Work item: $WORK_ITEM_ID
+Work item: $WORK_ITEM_KEY
 
 - Code we own: follow [paths/code.md](paths/code.md).
 - Anything else: stop.
@@ -132,7 +132,7 @@ def test_unknown_tokens_in_prose_are_rejected_but_code_is_exempt(tmp_path: Path)
 
 def test_the_work_item_token_is_an_error_on_a_sweep(tmp_path: Path) -> None:
     path = project(tmp_path)
-    (tmp_path / "tracks" / "audit" / "SKILL.md").write_text(SWEEP + "\nItem: $WORK_ITEM_ID\n")
+    (tmp_path / "tracks" / "audit" / "SKILL.md").write_text(SWEEP + "\nItem: $WORK_ITEM_KEY\n")
 
     report = validate.validate(path)
 

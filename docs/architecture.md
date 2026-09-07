@@ -54,6 +54,20 @@ paths the same way `TINA_CONTROL` does, so one image runs against a config
 mounted anywhere. `run --model` runs one execution on a model other than the
 track's own, for trying one out without editing the config.
 
+### Embedding
+
+Tina is a library first. A factory with its own operator CLI calls
+`config.load(path, tracks_dir=…, control=…, artifacts_dir=…)`,
+`cli.run_item`, `cli.dispatch_track` (with a `Governor`, §5), `validate`,
+`doctor.diagnose`, and `introspect` directly, and keeps its own names for
+everything a person sees: its registry can be `config/tracks.toml`, its
+environment variables its own, its commands under its own binary. The
+`TINA_*` variables and the `tina.toml` default are conveniences of the `tina`
+command, not the contract; the `$WORK_ITEM_KEY` token and the outcome
+instructions in the prompt are the contract, because tracks are written
+against them. Text Tina writes where a person will read it — the write-back
+comment on a work item — names no runner for the same reason.
+
 Tina does not own scheduling. There is no open standard for declaring a schedule
 that targets native cloud schedulers, and cron dialects are not even portable
 across them (EventBridge uses 6 fields with `?` and a year; GCP, k8s, and
@@ -459,8 +473,8 @@ agent runs with its working directory set to the run's temp workdir, and
 without the anchor every relative reference in the skill resolves nowhere.
 `SKILL.md`'s leading YAML frontmatter is stripped before inlining — it is
 adapter metadata, not prompt content. One token is substituted in the skill
-body: `$WORK_ITEM_ID` becomes the item's tracker identifier, so a router can
-open with "Work item: $WORK_ITEM_ID" without parsing the JSON block that
+body: `$WORK_ITEM_KEY` becomes the item's tracker identifier, so a router can
+open with "Work item: $WORK_ITEM_KEY" without parsing the JSON block that
 follows. It is the only runner token; `tina validate` rejects any other bare
 `$TOKEN` in prose.
 

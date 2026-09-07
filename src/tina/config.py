@@ -25,7 +25,9 @@ A track may name its query outright, or give the parts and let Tina build it
 
 Three environment variables override the top-level paths, so one image runs
 against configs mounted anywhere: `TINA_TRACKS_DIR`, `TINA_ARTIFACTS_DIR`, and
-— read by `tina.control`, not here — `TINA_CONTROL`.
+— read by `tina.control`, not here — `TINA_CONTROL`. A program embedding Tina
+passes the same three as keyword arguments to `load` instead, under whatever
+names its own environment uses.
 """
 
 from __future__ import annotations
@@ -455,8 +457,21 @@ class Config(BaseModel):
         return self.path.parent / self.artifacts_dir
 
 
-def load(path: Path | str) -> Config:
-    """Read and validate a config file. Fails fast with the file name in the message."""
+def load(
+    path: Path | str,
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+) -> Config:
+    """Read and validate a config file. Fails fast with the file name in the message.
+
+    The keyword overrides are the library caller's equivalent of the
+    `TINA_*` environment variables the CLI honors: a program embedding Tina
+    decides where its tracks, control file, and artifacts live under its own
+    names, and passes the paths here. An override wins over both the file and
+    the environment.
+    """
     path = Path(path)
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -473,11 +488,18 @@ def load(path: Path | str) -> Config:
                 " [harnesses.<name>] and [executors.<name>]"
             )
         raise ConfigError(f"{path}: invalid TOML: {exc}", fix=fix) from None
-    return parse(raw, path)
+    return parse(raw, path, tracks_dir=tracks_dir, control=control, artifacts_dir=artifacts_dir)
 
 
-def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
-    """Build a Config from an already-decoded TOML mapping."""
+def parse(
+    raw: dict[str, Any],
+    path: Path | str = "<config>",
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+) -> Config:
+    """Build a Config from an already-decoded TOML mapping. Overrides as in `load`."""
     path = Path(path)
 
     if "harness" not in raw:
@@ -517,9 +539,13 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
             "path": path,
             "harness": raw["harness"],
             "executor": raw.get("executor", "local"),
-            "tracks_dir": os.environ.get(TRACKS_DIR_VAR) or raw.get("tracks_dir", "tracks"),
-            "control": raw.get("control"),
-            "artifacts_dir": os.environ.get(ARTIFACTS_DIR_VAR) or raw.get("artifacts_dir"),
+            "tracks_dir": tracks_dir
+            or os.environ.get(TRACKS_DIR_VAR)
+            or raw.get("tracks_dir", "tracks"),
+            "control": control or raw.get("control"),
+            "artifacts_dir": artifacts_dir
+            or os.environ.get(ARTIFACTS_DIR_VAR)
+            or raw.get("artifacts_dir"),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
             "tracks": tracks,

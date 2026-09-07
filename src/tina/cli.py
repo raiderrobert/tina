@@ -896,12 +896,15 @@ def _failure_comment(record: RunRecord) -> str:
     """The effective status, the agent's details, and the log link.
 
     When the executor cannot name its logs the link line is simply absent —
-    a comment must never say "logs unavailable" where a pointer belongs.
+    a comment must never say "logs unavailable" where a pointer belongs. The
+    text names no runner: it is read by whoever owns the ticket, in a factory
+    that has its own name, and "tina" would be a vendor leaking onto a
+    surface that is not Tina's.
     """
     status = f"run ended {record.effective_status}"
     if record.report.verified is False:
         status += " (the agent reported resolved, but artifact verification failed)"
-    lines = [f"tina: {status}; blocking this item from re-dispatch."]
+    lines = [f"Automated {status}; blocking this item from re-dispatch."]
     if record.report.details:
         details = record.report.details
         if len(details) > _DETAILS_LIMIT:
