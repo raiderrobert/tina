@@ -40,16 +40,23 @@ def diagnose(
     config_path: Path | str,
     only: str | None = None,
     build_source: SourceBuilder | None = None,
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
 ) -> list[Check]:
     """Run every probe against the config and return the verdicts in order.
 
     `build_source` is the seam for tests: the real one, `sources.build`, opens
     an HTTP client from the environment. Resolved at call time so a patched
-    `sources.build` is honored.
+    `sources.build` is honored. The keyword overrides are `config.load`'s, for
+    an embedder whose paths come from its own environment.
     """
     build_source = build_source or sources.build
     try:
-        config = load_config(config_path)
+        config = load_config(
+            config_path, tracks_dir=tracks_dir, control=control, artifacts_dir=artifacts_dir
+        )
     except ConfigError as exc:
         return [Check("config loads", False, str(exc))]
     checks = [Check("config loads", True, str(config.path))]

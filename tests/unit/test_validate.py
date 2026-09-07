@@ -203,3 +203,15 @@ def test_a_disabled_track_is_still_checked(tmp_path: Path) -> None:
 
     assert not report.ok
     assert any("paths/code.md" in e for e in report.errors)
+
+
+def test_a_tracks_dir_override_is_where_the_skills_are_read_from(tmp_path: Path) -> None:
+    """An embedder's skills may live far from its registry."""
+    path = project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    (tmp_path / "tracks").rename(elsewhere)
+
+    assert not validate.validate(path).ok, "the config's own tracks_dir no longer resolves"
+    report = validate.validate(path, tracks_dir=elsewhere)
+    assert report.ok, report.errors
+    assert report.summary[-1].startswith(str(elsewhere))

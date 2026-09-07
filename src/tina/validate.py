@@ -108,16 +108,27 @@ class Report:
         return not self.errors
 
 
-def validate(config_path: Path | str, only: str | None = None) -> Report:
+def validate(
+    config_path: Path | str,
+    only: str | None = None,
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+) -> Report:
     """Run every check. `only` scopes the skill-level checks to one track.
 
     Config-level errors are always global — the file must parse whole — and
     the orphan-directory warning describes the whole `tracks_dir`, so a scoped
     run skips it rather than reporting a neighbour's problem under one track.
+    The keyword overrides are `config.load`'s, for an embedder whose paths
+    come from its own environment.
     """
     report = Report()
     try:
-        config = load_config(config_path)
+        config = load_config(
+            config_path, tracks_dir=tracks_dir, control=control, artifacts_dir=artifacts_dir
+        )
     except ConfigError as exc:
         report.errors.append(str(exc))
         return report
