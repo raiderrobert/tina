@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -181,13 +182,19 @@ def _run_with_retries(
 
 
 def _run_relaying(
-    command: list[str], workdir: Path, env: dict[str, str] | None, timeout: float
+    command: list[str],
+    workdir: Path,
+    env: dict[str, str] | None,
+    timeout: float,
+    echo: bool = True,
 ) -> tuple[int, str]:
-    """Run the command with its output piped through to stderr, line by line.
+    """Run the command with its output piped, line by line.
 
-    Piped rather than inherited so the retry markers can be seen, and relayed
-    as it arrives so a log collector still gets the run as it happens instead
-    of one block at the end. Stderr, because stdout is Tina's JSON records.
+    Piped rather than inherited so the retry markers can be seen, and — when
+    `echo` is on — relayed as it arrives so a log collector still gets the run
+    as it happens instead of one block at the end. Stderr, because stdout is
+    Tina's JSON records. A probe turns `echo` off: its output is a verdict to
+    summarize, not a run to follow.
     """
     lines: list[str] = []
     with subprocess.Popen(
@@ -201,14 +208,77 @@ def _run_relaying(
     ) as proc:
         try:
             for line in proc.stdout or ():
-                sys.stderr.write(line)
-                sys.stderr.flush()
+                if echo:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
                 lines.append(line)
             returncode = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             raise
     return returncode, "".join(lines)
+
+
+PROBE_TIMEOUT = 120.0
+
+#: The whole task a probe asks of the agent: prove the harness reaches the
+#: model and the model can follow the outcome contract. Nothing else.
+PROBE_PROMPT = """\
+This is a connectivity probe, not a task. Do not read or change anything.
+
+Write a JSON file to exactly this path:
+
+    {outcome_path}
+
+containing exactly this object and nothing else:
+
+    {{"outcome": "no_action_needed", "details": "probe"}}
+
+Then stop.
+"""
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """One harness invocation with a trivial prompt: did the model answer?"""
+
+    ok: bool
+    detail: str = ""
+
+
+def probe(config: HarnessConfig, model: str | None, timeout: float = PROBE_TIMEOUT) -> ProbeResult:
+    """Run the harness once, for real, with a prompt whose only job is to be
+    answered — the configured command, the given model, the outcome contract.
+
+    No retries: a probe wants the verdict now. A nonzero exit whose output
+    carries one of the harness's retry markers still counts as answering —
+    the request reached the model and was throttled, which proves exactly
+    what a probe asks — and says so. The temp directory is gone on return.
+    """
+    with tempfile.TemporaryDirectory(prefix="tina-probe-") as tmp:
+        workdir = Path(tmp)
+        prompt_file = write_prompt(PROBE_PROMPT.format(outcome_path=outcome_path(workdir)), workdir)
+        session_dir = session_path(workdir) if config.command.uses("session_dir") else None
+        if session_dir is not None:
+            session_dir.mkdir(parents=True, exist_ok=True)
+        command = config.command.render(prompt_file, workdir, model=model, session_dir=session_dir)
+        try:
+            returncode, output = _run_relaying(command, workdir, None, timeout, echo=False)
+        except subprocess.TimeoutExpired:
+            return ProbeResult(ok=False, detail=f"timed out after {timeout:g}s")
+        except OSError as exc:
+            return ProbeResult(ok=False, detail=f"could not start harness {config.name!r}: {exc}")
+        report = read_outcome(outcome_path(workdir), returncode)
+
+    if returncode == 0 and report.outcome is not OutcomeStatus.FAILED:
+        return ProbeResult(ok=True)
+    throttled = next((rule for rule in config.retry if rule.matches(output)), None)
+    if throttled is not None:
+        return ProbeResult(
+            ok=True, detail=f"answered, throttled: {throttled.reason or 'retryable'}"
+        )
+    tail = " ".join(output.split())[-300:] if output.strip() else report.details
+    return ProbeResult(ok=False, detail=f"exit {returncode}: {tail}")
 
 
 #: Captured files whose text is scrubbed for credential shapes before it is

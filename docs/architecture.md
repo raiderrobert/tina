@@ -38,7 +38,7 @@ tina status --track vul                 # introspection: queued and in flight
 tina tracks [--format json]             # introspection: what is configured
 tina config-options [--format markdown] # introspection: every track key, from the schema
 tina validate                           # admission: config and every skill, statically
-tina doctor                             # admission: credentials, queries, harness, executor
+tina doctor                             # admission: credentials, queries, harness, models, executor
 ```
 
 Every subcommand splits its output by audience: stdout carries the structured
@@ -467,6 +467,17 @@ tracks — and a track setting `model` under a command that never references it
 is equally a config-load error, because the value would silently not reach the
 harness.
 
+A top-level `models` list names the models the deployment has enabled, as
+the exact strings `{model}` takes. Tina never parses a model reference — its
+grammar is the harness's — so the list is matched literally. When set, every
+track's `model` and every `run --model` override must be in it, checked at
+config load: a model the provider does not serve this deployment fails every
+run of the track that names it, from inside the harness where nobody is
+looking. The same list is what `doctor` proves answers (§3): one trivial
+prompt through the real command per model, with a harness retry marker in the
+output counting as an answer — the request reached the model. Unset means
+unconstrained.
+
 The assembled prompt opens by naming the absolute skill directory. Skills past
 a few hundred lines are multi-file (`paths/`, `references/`, `scripts/`), the
 agent runs with its working directory set to the run's temp workdir, and
@@ -565,6 +576,7 @@ secrets plumbing.
 harness = "pi"                  # selects [harnesses.pi]
 executor = "cloudrun"           # selects [executors.cloudrun]
 tracks_dir = "tracks"           # where napoln installed the skills
+models = ["claude-sonnet-x", "gemini-flash-y"]   # what {model} may be; unset = anything
 
 [harnesses.pi]
 command = ["pi", "-p", "@{prompt_file}"]

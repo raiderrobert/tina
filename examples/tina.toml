@@ -8,6 +8,11 @@ harness = "pi"
 executor = "local"
 tracks_dir = "tracks"
 
+# The models the harness may run, as the exact strings {model} takes. When
+# set, every track's `model` and every `run --model` override must be listed,
+# and `tina doctor` proves each one answers. Unset means unconstrained.
+# models = ["claude-sonnet-x", "gemini-flash-y"]
+
 # Where to keep each run's harness session (transcript, tool calls, costs).
 # After the harness exits, whatever it left in {session_dir} is copied to
 # <artifacts_dir>/<item>/ — best-effort, any outcome. Unset skips the copy;

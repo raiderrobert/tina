@@ -361,8 +361,7 @@ def test_the_first_matching_rule_in_config_order_wins(tmp_path: Path) -> None:
     first, decides the wait."""
     fake = script(
         tmp_path,
-        "print('Quota exceeded for the model API: RESOURCE_EXHAUSTED')\n"
-        "raise SystemExit(1)",
+        "print('Quota exceeded for the model API: RESOURCE_EXHAUSTED')\nraise SystemExit(1)",
     )
     waits: list[float] = []
 
