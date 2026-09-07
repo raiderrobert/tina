@@ -337,6 +337,10 @@ ladder, and a 429 once, honoring a numeric `Retry-After` up to the minute the
 ladder allows. No other 4xx is ever retried, and a failure that outlives its
 ladder raises with the original status and message.
 
+GitHub work items are identified as `owner/name#N` — an issue's identity is
+its repo and its number, and the qualified form is unambiguous in a run
+record or a log line. Every entry point also accepts the bare number.
+
 v1 ships **Jira** and **GitHub Issues**. Two adapters, not one — a single
 implementation makes the interface accidentally Jira-shaped, and an OSS project
 that cannot be tried without a Jira instance will not get used. GitHub Issues is

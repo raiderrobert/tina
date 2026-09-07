@@ -22,6 +22,23 @@ Tina finds the file in this order
 3. `control = "/mnt/config/control.toml"` — a top-level key in `tina.toml`.
 4. Nothing configured — defaults: not paused, no throttle.
 
+## Room for the deployment's own gates
+
+Tina's keys are strict: an unknown top-level key is a typo and pauses. A
+*table* Tina does not define passes through instead, so a deployment's own
+policy — a governor's mode, say — lives beside `paused` without Tina knowing
+it:
+
+```toml
+paused = false
+max_concurrency = 5
+
+[factory]
+governor = "active"      # read by the deployment's own dispatch code
+```
+
+Such tables arrive on `LoadedPolicy.extra`, verbatim.
+
 ## Read every dispatch, no cache
 
 The file is a kill switch. Staleness is the failure mode, so Tina never caches
