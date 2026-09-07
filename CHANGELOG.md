@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.3](https://github.com/raiderrobert/tina/compare/v0.1.2...v0.1.3) (2026-09-07)
+
+
+### Features
+
+* close the remaining gaps to a production factory ([#32](https://github.com/raiderrobert/tina/issues/32) P2–P5) ([cd3b58d](https://github.com/raiderrobert/tina/commit/cd3b58df86ca0359713ffc3bc9433a25b88c41db))
+* **control:** pass a deployment's own tables through; qualify GitHub item ids ([a901269](https://github.com/raiderrobert/tina/commit/a901269ec649b995b537378afa6dd0de4c16cd20))
+
+
+### Bug Fixes
+
+* **harness:** flatten path separators in the artifact directory name ([8d412bc](https://github.com/raiderrobert/tina/commit/8d412bcd04366ebb11238d2cd14ba28562abf60f))
+* **validate:** only prose references to paths/ and references/ must resolve ([3ea39ac](https://github.com/raiderrobert/tina/commit/3ea39ac78a013ee87aa770e9ce36fac21938e449))
+* **verify:** check tracker web URLs through the API they describe ([43acd57](https://github.com/raiderrobert/tina/commit/43acd571a32d1f91b957cee593a7f02172b9b68f))
+
+
+### Documentation
+
+* neutral example label in the structured-query examples ([9b05e90](https://github.com/raiderrobert/tina/commit/9b05e90fc9db8fc88d25ca9f105b9e645188fac0))
+
 ## [0.1.2](https://github.com/raiderrobert/tina/compare/v0.1.1...v0.1.2) (2026-08-27)
 
 
