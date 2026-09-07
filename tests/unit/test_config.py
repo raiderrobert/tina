@@ -562,14 +562,14 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 [smoke]
 source = "github"
 repo = "acme/api"
-labels = ["factory-smoke"]
+labels = ["needs-triage"]
 claim = "label"
 claim_label = "bot-claimed"
 """
     cfg = config.load(write(tmp_path, text))
 
     assert cfg.track("smoke").query == (
-        'repo:acme/api is:issue is:open no:assignee label:"factory-smoke"'
+        'repo:acme/api is:issue is:open no:assignee label:"needs-triage"'
         ' -label:"tina-blocked" -label:"bot-claimed"'
     )
 

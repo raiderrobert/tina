@@ -111,7 +111,7 @@ Squad = ["Reporting", "Site Experience"]     # onboarding a team is one line
 [smoke]
 source = "github"
 repo = "acme/api"
-labels = ["factory-smoke"]
+labels = ["needs-triage"]
 ```
 
 The builder owns the invariants every track would otherwise re-type into every
