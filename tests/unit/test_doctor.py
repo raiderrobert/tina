@@ -148,3 +148,22 @@ def test_only_narrows_to_one_track(tmp_path: Path) -> None:
 
     assert "[audit] skill" in checks
     assert "[vul] skill" not in checks
+
+
+def test_path_overrides_reach_the_probes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    (tmp_path / "tracks").rename(elsewhere)
+    (tmp_path / "control.toml").write_text("paused = true\nmax_concurrency = 2\n")
+
+    checks = by_name(
+        doctor.diagnose(
+            path,
+            build_source=lambda track: FakeSource(),
+            tracks_dir=elsewhere,
+            control=tmp_path / "control.toml",
+        )
+    )
+
+    assert checks["[vul] skill"].ok and checks["[vul] skill"].detail.startswith(str(elsewhere))
+    assert checks["control policy"].detail.endswith("paused true, max_concurrency 2")
