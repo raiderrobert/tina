@@ -6,7 +6,8 @@
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
         "pyproject.toml"
-      ]
+      ],
+      "release-as": "0.1.4"
     }
   }
 }
