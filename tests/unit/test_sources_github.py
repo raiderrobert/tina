@@ -17,7 +17,7 @@ BOT = "acme-tina[bot]"
 
 @pytest.fixture
 def item() -> WorkItem:
-    return WorkItem(id="42", source="github", title="crash on startup")
+    return WorkItem(id="acme/api#42", source="github", title="crash on startup")
 
 
 def issue(
@@ -58,7 +58,7 @@ def test_query_returns_normalized_items() -> None:
 
     assert seen["path"] == "/search/issues"
     assert seen["q"] == "repo:acme/api is:open"
-    assert [i.id for i in items] == ["42", "43"]
+    assert [i.id for i in items] == ["acme/api#42", "acme/api#43"]
     assert str(items[0].url) == f"https://github.com/{REPO}/issues/42"
     assert items[0].description == "stack trace follows"
 
@@ -142,7 +142,7 @@ def test_item_ids_are_accepted_in_several_shapes(item_id: str) -> None:
         assert request.url.path == f"/repos/{REPO}/issues/42"
         return httpx.Response(200, json=issue())
 
-    assert source(handler).get(item_id).id == "42"
+    assert source(handler).get(item_id).id == "acme/api#42"
 
 
 def test_repo_is_required() -> None:
@@ -172,7 +172,7 @@ def test_a_secondary_rate_limit_is_retried_once_after_the_documented_wait() -> N
     waits: list[float] = []
     items = source(handler, sleep=waits.append).query("repo:acme/api no:assignee")
 
-    assert [i.id for i in items] == ["42"]
+    assert [i.id for i in items] == ["acme/api#42"]
     assert waits == [60.0]
 
 
@@ -196,7 +196,7 @@ def test_gateway_errors_are_retried_on_a_short_ladder() -> None:
         return next(responses, httpx.Response(200, json=issue()))
 
     waits: list[float] = []
-    assert source(handler, sleep=waits.append).get("42").id == "42"
+    assert source(handler, sleep=waits.append).get("42").id == "acme/api#42"
     assert waits == [2.0, 8.0]
 
 
@@ -279,7 +279,7 @@ def test_claimed_swaps_the_no_assignee_qualifier_in_place() -> None:
     items_returned = [source(handler).claimed(q) for q, _ in cases]
 
     assert sent == [expected for _, expected in cases]
-    assert [i.id for i in items_returned[0]] == ["42", "43"]
+    assert [i.id for i in items_returned[0]] == ["acme/api#42", "acme/api#43"]
     assert str(items_returned[0][0].url) == f"https://github.com/{REPO}/issues/42"
 
 
@@ -565,3 +565,34 @@ def test_block_failure_is_logged_and_swallowed(
         source(handler).block(item)
 
     assert any("block failed" in record.message for record in caplog.records)
+
+
+# --- credentials and login ------------------------------------------------------
+
+
+def test_gh_token_is_accepted_as_the_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "ghp_from_the_cli_convention")
+
+    src = GitHubSource(repo=REPO)
+
+    assert src.client.headers["Authorization"] == "Bearer ghp_from_the_cli_convention"
+
+
+def test_github_token_wins_over_gh_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "canonical")
+    monkeypatch.setenv("GH_TOKEN", "alternative")
+
+    assert GitHubSource(repo=REPO).client.headers["Authorization"] == "Bearer canonical"
+
+
+def test_the_error_names_the_canonical_variable() -> None:
+    with pytest.raises(SourceError, match="GITHUB_TOKEN"):
+        GitHubSource(repo=REPO)
+
+
+def test_login_reports_who_the_token_acts_as() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/user"
+        return httpx.Response(200, json={"login": "acme-bot"})
+
+    assert source(handler, bot_login=None).login() == "acme-bot"

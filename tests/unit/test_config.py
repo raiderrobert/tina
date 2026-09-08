@@ -513,3 +513,322 @@ def test_an_unknown_executor_table_is_rejected(tmp_path: Path) -> None:
     text = MINIMAL + '\n[executors.nomad]\ndatacenter = "dc1"\n'
     with pytest.raises(config.ConfigError, match="nomad"):
         config.load(write(tmp_path, text))
+
+
+# --- structured query inputs -------------------------------------------------
+
+JIRA_PARTS = """
+harness = "pi"
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+[vul]
+source = "jira"
+project = "VUL"
+extra = "labels not in (wontfix)"
+
+[vul.filters]
+Team = ["Payments", "Search"]
+"""
+
+
+def test_jira_structured_inputs_build_the_query(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, JIRA_PARTS))
+
+    assert cfg.track("vul").query == (
+        'project = VUL AND status = "Open" AND "Team" in ("Payments", "Search")'
+        ' AND assignee IS EMPTY AND (labels IS EMPTY OR labels not in ("tina-blocked"))'
+        " AND (labels not in (wontfix)) ORDER BY created ASC"
+    )
+
+
+def test_a_blocked_transition_drops_the_label_guard_from_the_built_query(tmp_path: Path) -> None:
+    text = JIRA_PARTS.replace('project = "VUL"', 'project = "VUL"\nblocked_transition = "Blocked"')
+    cfg = config.load(write(tmp_path, text))
+
+    assert 'labels not in ("tina-blocked")' not in cfg.track("vul").query
+    assert "(labels not in (wontfix))" in cfg.track("vul").query, "extra still applies"
+    assert cfg.track("vul").blocked_transition == "Blocked"
+
+
+def test_github_structured_inputs_build_the_query(tmp_path: Path) -> None:
+    text = """
+harness = "pi"
+
+[harnesses.pi]
+command = ["pi", "--prompt-file", "{prompt_file}"]
+
+[smoke]
+source = "github"
+repo = "acme/api"
+labels = ["needs-triage"]
+claim = "label"
+claim_label = "bot-claimed"
+"""
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("smoke").query == (
+        'repo:acme/api is:issue is:open no:assignee label:"needs-triage"'
+        ' -label:"tina-blocked" -label:"bot-claimed"'
+    )
+
+
+def test_query_and_structured_inputs_are_mutually_exclusive(tmp_path: Path) -> None:
+    text = JIRA_PARTS.replace('project = "VUL"', 'project = "VUL"\nquery = "project = VUL"')
+
+    with pytest.raises(config.ConfigError, match="query is a full override"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_jira_track_needs_a_query_or_a_project(tmp_path: Path) -> None:
+    text = MINIMAL.replace('query = "project = VUL"', "")
+
+    with pytest.raises(config.ConfigError, match="requires query or project"):
+        config.load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("snippet", "message"),
+    [
+        ('project = "VUL; DROP"', "project key"),
+        ('[vul.filters]\nTeam = ["Team \\" OR 1=1"]', "filter value"),
+        ("[vul.filters]\nTeam = []", "at least one value"),
+        ('[vul.filters]\n"Team)" = ["x"]', "filter field"),
+    ],
+)
+def test_interpolated_jira_values_are_validated(tmp_path: Path, snippet: str, message: str) -> None:
+    text = JIRA_PARTS.replace('extra = "labels not in (wontfix)"', "").replace(
+        '[vul.filters]\nTeam = ["Payments", "Search"]', ""
+    )
+    text = text.replace('project = "VUL"', 'project = "VUL"\n' + snippet, 1)
+    if 'project = "VUL; DROP"' in snippet:
+        text = text.replace('project = "VUL"\n', "", 1)
+
+    with pytest.raises(config.ConfigError, match=message):
+        config.load(write(tmp_path, text))
+
+
+def test_github_labels_reject_quotes(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"',
+        'source = "github"\nrepo = "acme/api"\nlabels = [\'a"b\']',
+    )
+
+    with pytest.raises(config.ConfigError, match="may not contain quotes"):
+        config.load(write(tmp_path, text))
+
+
+def test_a_malformed_repo_is_rejected(tmp_path: Path) -> None:
+    text = MINIMAL.replace('source = "jira"', 'source = "github"\nrepo = "not-a-repo"')
+
+    with pytest.raises(config.ConfigError, match='must be "owner/name"'):
+        config.load(write(tmp_path, text))
+
+
+def test_jira_inputs_are_refused_on_a_github_track(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"',
+        'source = "github"\nrepo = "acme/api"\nproject = "X"',
+    )
+
+    with pytest.raises(config.ConfigError, match='only apply when source = "jira"'):
+        config.load(write(tmp_path, text))
+
+
+def test_github_inputs_are_refused_on_a_jira_track(tmp_path: Path) -> None:
+    text = MINIMAL + 'labels = ["x"]\n'
+
+    with pytest.raises(config.ConfigError, match='only apply when source = "github"'):
+        config.load(write(tmp_path, text))
+
+
+def test_blocked_transition_is_jira_only(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"',
+        'source = "github"\nrepo = "acme/api"\nquery = "repo:acme/api"\nblocked_transition = "X"',
+    )
+
+    with pytest.raises(config.ConfigError, match="blocked_transition only applies to jira"):
+        config.load(write(tmp_path, text))
+
+
+def test_structured_inputs_are_queue_only(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"', 'mode = "sweep"\nproject = "VUL"'
+    )
+
+    with pytest.raises(config.ConfigError, match="remove: project"):
+        config.load(write(tmp_path, text))
+
+
+# --- max_concurrency ----------------------------------------------------------
+
+
+def test_max_concurrency_must_be_a_positive_integer(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="max_concurrency"):
+        config.load(write(tmp_path, MINIMAL + "max_concurrency = 0\n"))
+    with pytest.raises(config.ConfigError, match="max_concurrency"):
+        config.load(write(tmp_path, MINIMAL + "max_concurrency = true\n"))
+
+    assert (
+        config.load(write(tmp_path, MINIMAL + "max_concurrency = 20\n"))
+        .track("vul")
+        .max_concurrency
+        == 20
+    )
+
+
+def test_max_concurrency_is_queue_only(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"', 'mode = "sweep"\nmax_concurrency = 2'
+    )
+
+    with pytest.raises(config.ConfigError, match="remove: max_concurrency"):
+        config.load(write(tmp_path, text))
+
+
+# --- environment overrides for the top-level paths -------------------------
+
+
+def test_tina_tracks_dir_overrides_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(config.TRACKS_DIR_VAR, "/app/tracks")
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.tracks_dir == Path("/app/tracks")
+    assert cfg.track_dir(cfg.track("vul")) == Path("/app/tracks/vul")
+
+
+def test_tina_artifacts_dir_overrides_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(config.ARTIFACTS_DIR_VAR, "/mnt/sessions")
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.artifacts_path() == Path("/mnt/sessions")
+
+
+# --- track lookup, cloud run job template, harness retry ---------------------
+
+
+def test_track_lookup_is_case_insensitive(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+
+    assert cfg.track("VUL").name == "vul"
+    with pytest.raises(config.ConfigError, match="no track named"):
+        cfg.track("bug")
+
+
+def test_cloudrun_job_may_carry_the_track_placeholder(tmp_path: Path) -> None:
+    text = (
+        MINIMAL.replace('harness = "pi"', 'harness = "pi"\nexecutor = "cloudrun"')
+        + '\n[executors.cloudrun]\nproject = "p"\nregion = "r"\njob = "factory-{track}"\n'
+    )
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.cloudrun_options().job_name("vul") == "factory-vul"
+    assert cfg.cloudrun_options().job_path("vul") == "projects/p/locations/r/jobs/factory-vul"
+
+
+def test_harness_retry_rules_are_parsed_in_order(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'command = ["pi", "--prompt-file", "{prompt_file}"]',
+        'command = ["pi", "--prompt-file", "{prompt_file}"]\n'
+        "retry = [\n"
+        '  { markers = ["Quota exceeded"], waits = [60, 300], reason = "quota" },\n'
+        '  { markers = ["overloaded_error", "RESOURCE_EXHAUSTED"], waits = [30] },\n'
+        "]",
+    )
+    cfg = config.load(write(tmp_path, text))
+    rules = cfg.harness_config().retry
+
+    assert [r.reason for r in rules] == ["quota", ""]
+    assert rules[0].waits == [60.0, 300.0]
+    assert rules[1].matches("HTTP 429 RESOURCE_EXHAUSTED")
+    assert not rules[1].matches("all good")
+
+
+def test_a_retry_rule_needs_markers_and_waits(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'command = ["pi", "--prompt-file", "{prompt_file}"]',
+        'command = ["pi", "--prompt-file", "{prompt_file}"]\n'
+        "retry = [{ markers = [], waits = [1] }]",
+    )
+
+    with pytest.raises(config.ConfigError, match="markers"):
+        config.load(write(tmp_path, text))
+
+
+# --- overrides for library callers -----------------------------------------------
+
+
+def test_load_accepts_path_overrides_for_embedders(tmp_path: Path) -> None:
+    """A program embedding tina keeps its own environment contract and passes
+    the paths in; nothing here reads TINA_*."""
+    cfg = config.load(
+        write(tmp_path, MINIMAL),
+        tracks_dir="/app/skills",
+        control="/mnt/policy/control.toml",
+        artifacts_dir="/mnt/sessions",
+    )
+
+    assert cfg.track_dir(cfg.track("vul")) == Path("/app/skills/vul")
+    assert cfg.control_path() == Path("/mnt/policy/control.toml")
+    assert cfg.artifacts_path() == Path("/mnt/sessions")
+
+
+def test_an_override_wins_over_the_environment_and_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(config.TRACKS_DIR_VAR, "/from/env")
+    text = MINIMAL.replace('harness = "pi"', 'harness = "pi"\ntracks_dir = "from-file"', 1)
+
+    cfg = config.load(write(tmp_path, text), tracks_dir="/from/caller")
+
+    assert cfg.tracks_dir == Path("/from/caller")
+
+
+# --- the models list ----------------------------------------------------------------
+
+MODELLED = """
+harness = "pi"
+models = ["fast", "frontier"]
+
+[harnesses.pi]
+command = ["pi", "-p", "@{prompt_file}", "--model", "{model}"]
+
+[vul]
+source = "jira"
+query = "project = VUL"
+model = "frontier"
+"""
+
+
+def test_a_tracks_model_must_be_listed_when_models_is_set(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODELLED))
+    assert cfg.models == ["fast", "frontier"]
+    assert cfg.allows_model("fast") and not cfg.allows_model("other")
+
+    with pytest.raises(config.ConfigError, match="'other' is not in `models`"):
+        config.load(write(tmp_path, MODELLED.replace('model = "frontier"', 'model = "other"')))
+
+
+def test_no_models_list_means_unconstrained(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MODELLED.replace('models = ["fast", "frontier"]\n', "")))
+    assert cfg.models == []
+    assert cfg.allows_model("anything")
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ('models = ["fast", "fast"]', "listed twice"),
+        ('models = ["a b"]', "no whitespace"),
+        ('models = [""]', "non-empty"),
+    ],
+)
+def test_models_entries_are_validated(tmp_path: Path, value: str, message: str) -> None:
+    with pytest.raises(config.ConfigError, match=message):
+        config.load(write(tmp_path, MODELLED.replace('models = ["fast", "frontier"]', value)))

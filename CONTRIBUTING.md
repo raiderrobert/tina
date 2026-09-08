@@ -53,15 +53,22 @@ caches). `just` with no recipe lists them all.
 
 ```
 src/tina/
-├── cli.py           # `tina dispatch` and `tina run` — two roles, one image
+├── cli.py           # dispatch, run, status, tracks, config-options, validate, doctor
 ├── __main__.py      # `python -m tina`, how the local executor spawns workers
 ├── config.py        # TOML configuration
+├── query.py         # Structured query inputs -> JQL / GitHub search
 ├── control.py       # Runtime policy: paused and max_concurrency, fail-closed
+├── governor.py      # The Governor protocol: a per-cycle throughput policy seam
 ├── models.py        # Work items in, outcome reports out
 ├── prompt.py        # One-shot prompt assembly
-├── harness.py       # Harness invocation
+├── harness.py       # Harness invocation, retry rules, artifact capture
+├── scrub.py         # Credential redaction for captured artifacts
 ├── verify.py        # Generic artifact verification
+├── validate.py      # Admission: static checks on config and skills
+├── doctor.py        # Admission: live probes of credentials, queries, harness
+├── introspect.py    # `tina tracks` and `tina config-options` renderers
 ├── log.py           # Structured logging, one JSON object per line
+├── output.py        # Human-facing stderr output
 ├── errors.py        # TinaError — the one thing the CLI catches
 ├── sources/         # Where work items come from, and how they get claimed
 │   ├── base.py      # Source protocol, require_env, parse_payload
@@ -85,8 +92,9 @@ justfile               # Every check, in one place
 ## Adding a source adapter
 
 1. Implement the `Source` protocol in `src/tina/sources/base.py` — `query`,
-   `get`, `claim`. Use `require_env` and `parse_payload` from the same module
-   for credentials and response validation.
+   `get`, `matches`, `claim`, `claim_prognosis`, `claimed`, `annotate`,
+   `block`, `login`. Use `require_env` and `parse_payload` from the same
+   module for credentials and response validation.
 2. Register it in the `build()` dispatch in `src/tina/sources/__init__.py`.
 3. Add `tests/unit/test_sources_<name>.py`, modeled on `test_sources_jira.py` and
    `test_sources_github.py`.
@@ -96,7 +104,7 @@ justfile               # Every check, in one place
 ## Adding an executor
 
 1. Implement the `Executor` protocol in `src/tina/executors/base.py` —
-   `enqueue`.
+   `enqueue`, `running`, `run_url`.
 2. Register it in `build()` in `src/tina/executors/__init__.py`.
 3. Add cases to `tests/unit/test_executors.py`, modeled on the existing `local` and
    `cloudrun` tests.

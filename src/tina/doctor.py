@@ -1,0 +1,158 @@
+"""Admission, live: prove the deployment works before the first run.
+
+`tina validate` reads files. `tina doctor` talks to the systems: every source a
+track uses authenticates and its query parses, the harness binary is on PATH,
+the executor can be constructed, the control file — if one is configured —
+loads without failing closed, and every model the deployment lists answers
+through the harness. The first-run failure mode for a new user is otherwise a
+stack trace from whichever adapter happened to be called first, after they
+have already written a config and a track.
+
+Every check is read-only against the trackers: nothing is claimed, enqueued,
+or written back. The model probes do run the harness — one trivial prompt per
+model, which costs one small model call each — because a model the provider
+does not serve fails every run of the track that names it, from inside the
+harness. `probe_models=False` skips them.
+"""
+
+from __future__ import annotations
+
+import shutil
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from pathlib import Path
+
+from tina import control, executors, harness, sources
+from tina.config import Config, ConfigError
+from tina.config import load as load_config
+from tina.errors import TinaError
+from tina.sources.base import Source
+
+
+@dataclass(frozen=True)
+class Check:
+    """One probe's verdict. `detail` says what was found, either way."""
+
+    name: str
+    ok: bool
+    detail: str = ""
+
+
+SourceBuilder = Callable[..., Source]
+
+
+def diagnose(
+    config_path: Path | str,
+    only: str | None = None,
+    build_source: SourceBuilder | None = None,
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+    probe_models: bool = True,
+) -> list[Check]:
+    """Run every probe against the config and return the verdicts in order.
+
+    `build_source` is the seam for tests: the real one, `sources.build`, opens
+    an HTTP client from the environment. Resolved at call time so a patched
+    `sources.build` is honored. The keyword overrides are `config.load`'s, for
+    an embedder whose paths come from its own environment.
+    """
+    build_source = build_source or sources.build
+    try:
+        config = load_config(
+            config_path, tracks_dir=tracks_dir, control=control, artifacts_dir=artifacts_dir
+        )
+    except ConfigError as exc:
+        return [Check("config loads", False, str(exc))]
+    checks = [Check("config loads", True, str(config.path))]
+    harness_checks = list(_harness(config))
+    checks.extend(harness_checks)
+    checks.append(_executor(config))
+    checks.append(_control(config))
+    if probe_models and all(check.ok for check in harness_checks):
+        checks.extend(_models(config))
+    tracks = config.tracks.values()
+    if only is not None:
+        try:
+            tracks = [config.track(only)]
+        except ConfigError as exc:
+            return [*checks, Check(f"track {only!r}", False, str(exc))]
+    for track in tracks:
+        checks.extend(_track(config, track.name, build_source))
+    return checks
+
+
+def _harness(config: Config) -> Iterator[Check]:
+    harness = config.harness_config()
+    binary = harness.command.args[0]
+    found = shutil.which(binary)
+    yield Check(
+        f"harness {harness.name!r} on PATH",
+        found is not None,
+        found or f"{binary!r} not found; the worker image must install it",
+    )
+
+
+def _models(config: Config) -> Iterator[Check]:
+    """Every model the deployment lists answers through the harness.
+
+    With no `models` list, the distinct models the tracks name are probed
+    instead; with a harness that takes no `{model}`, the harness itself is
+    probed once. A probe is the real command and the real outcome contract
+    with a prompt whose only job is to be answered.
+    """
+    harness_config = config.harness_config()
+    if not harness_config.command.uses("model"):
+        result = harness.probe(harness_config, None)
+        yield Check(f"harness {harness_config.name!r} answers", result.ok, result.detail)
+        return
+    models = config.models or sorted(
+        {track.model for track in config.tracks.values() if track.model is not None}
+    )
+    for model in models:
+        result = harness.probe(harness_config, model)
+        yield Check(f"model {model!r} answers", result.ok, result.detail)
+
+
+def _executor(config: Config) -> Check:
+    try:
+        executor = executors.build(config)
+    except TinaError as exc:
+        return Check(f"executor {config.executor!r}", False, f"{exc} {exc.fix}".strip())
+    return Check(f"executor {config.executor!r}", True, type(executor).__name__)
+
+
+def _control(config: Config) -> Check:
+    policy = control.load(config.control_path())
+    if policy.origin == "defaults":
+        return Check("control policy", True, "none configured; defaults apply")
+    if policy.paused and policy.max_concurrency == 0:
+        return Check("control policy", False, f"{policy.origin}: invalid, failing closed (paused)")
+    throttle = "unset" if policy.max_concurrency is None else policy.max_concurrency
+    return Check(
+        "control policy",
+        True,
+        f"{policy.origin}: paused {str(policy.paused).lower()}, max_concurrency {throttle}",
+    )
+
+
+def _track(config: Config, name: str, build_source: SourceBuilder) -> Iterator[Check]:
+    track = config.track(name)
+    skill = config.track_dir(track) / "SKILL.md"
+    yield Check(f"[{name}] skill", skill.is_file(), str(skill))
+    if track.mode == "sweep":
+        return
+    try:
+        source = build_source(track)
+        identity = source.login()
+    except TinaError as exc:
+        yield Check(f"[{name}] {track.source} credentials", False, f"{exc} {exc.fix}".strip())
+        return
+    yield Check(f"[{name}] {track.source} credentials", True, f"acting as {identity}")
+    try:
+        matched = len(source.query(track.query))
+    except TinaError as exc:
+        yield Check(f"[{name}] query", False, str(exc))
+        return
+    yield Check(f"[{name}] query", True, f"{matched} item(s) match now")

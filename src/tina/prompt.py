@@ -13,6 +13,17 @@ from tina.models import WorkItem
 
 SKILL_FILE = "SKILL.md"
 
+#: The one token Tina substitutes in skill prose: `$WORK_ITEM_KEY` becomes the
+#: work item's tracker key. A skill that wants the item inline — "Work item:
+#: $WORK_ITEM_KEY" at the top of a router — gets it without parsing the JSON
+#: block below. `tina validate` rejects any other bare `$TOKEN` in prose, since
+#: an unrecognised one reaches the model verbatim. "Key" rather than "id": a
+#: token is part of the prompt contract tracks are written against, and the
+#: tracks that exist call it the work-item key — a runner adapts to its
+#: prompt library, not the reverse.
+WORK_ITEM_TOKEN = "$WORK_ITEM_KEY"
+RUNNER_TOKENS = frozenset({WORK_ITEM_TOKEN.lstrip("$")})
+
 
 class PromptError(TinaError, RuntimeError):
     """The track skill could not be read."""
@@ -68,6 +79,8 @@ def build(track_dir: Path, item: WorkItem | None, outcome_path: Path) -> str:
     work-item block is omitted entirely. The outcome contract is unchanged.
     """
     skill = strip_frontmatter(read_skill(track_dir))
+    if item is not None:
+        skill = skill.replace(WORK_ITEM_TOKEN, item.id)
     parts = [
         SKILL_ROOT_ANCHOR.format(skill_root=track_dir.resolve()),
         skill.rstrip(),

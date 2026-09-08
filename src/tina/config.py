@@ -8,7 +8,7 @@ harness, and one table per track::
     tracks_dir = "tracks"
 
     [harnesses.pi]
-    command = ["pi", "--prompt-file", "{prompt_file}"]
+    command = ["pi", "-p", "@{prompt_file}"]
 
     [vul]
     source = "jira"
@@ -18,10 +18,21 @@ harness, and one table per track::
 
 Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name.
+
+A track may name its query outright, or give the parts and let Tina build it
+(`tina.query`): a Jira `project` plus `filters`, or a GitHub `repo` plus
+`labels`. Onboarding a team is then one array edit.
+
+Three environment variables override the top-level paths, so one image runs
+against configs mounted anywhere: `TINA_TRACKS_DIR`, `TINA_ARTIFACTS_DIR`, and
+— read by `tina.control`, not here — `TINA_CONTROL`. A program embedding Tina
+passes the same three as keyword arguments to `load` instead, under whatever
+names its own environment uses.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -29,6 +40,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from tina import query as query_builders
 from tina.errors import TinaError
 
 SOURCES = ("jira", "github")
@@ -42,8 +54,17 @@ PLACEHOLDERS = frozenset({"prompt_file", "outcome_dir", "model", "session_dir"})
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 
 # Top-level scalars, as opposed to tables that define adapters or tracks.
-_SCALAR_KEYS = frozenset({"harness", "executor", "tracks_dir", "control", "artifacts_dir"})
+_SCALAR_KEYS = frozenset(
+    {"harness", "executor", "tracks_dir", "control", "artifacts_dir", "models"}
+)
 _ADAPTER_TABLES = frozenset({"harnesses", "executors"})
+
+#: Environment overrides for the top-level paths. One image, many mounts.
+TRACKS_DIR_VAR = "TINA_TRACKS_DIR"
+ARTIFACTS_DIR_VAR = "TINA_ARTIFACTS_DIR"
+
+#: The placeholder a Cloud Run `job` may carry, for one job per track.
+TRACK_PLACEHOLDER = "{track}"
 
 #: The namespace of environment variables tina itself owns (TINA_CONTROL,
 #: TINA_HARNESS_TIMEOUT, ...). A track shadowing one would change tina's
@@ -64,8 +85,29 @@ _QUEUE_ONLY_KEYS = frozenset(
         "claim_transition",
         "on_failure",
         "blocked_label",
+        "blocked_transition",
+        "max_concurrency",
+        "project",
+        "status",
+        "filters",
+        "extra",
+        "labels",
     }
 )
+
+#: Structured query inputs, by the source they build a query for. A key from
+#: the other source's set is a config bug, named at load.
+_JIRA_QUERY_KEYS = ("project", "status", "filters", "extra")
+_GITHUB_QUERY_KEYS = ("labels",)
+
+# Values the query builders interpolate. Validated here so the builders can
+# concatenate without escaping: a team name with a quote in it is at best a
+# broken query, at worst an injected one.
+_JIRA_PROJECT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_JIRA_FIELD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _\-\[\]\.]*$")
+_JIRA_VALUE = re.compile(r"^[A-Za-z0-9 _\-'&.:/]+$")
+_GITHUB_REPO = re.compile(r"^[\w.-]+/[\w.-]+$")
+_GITHUB_LABEL = re.compile(r'^[^"\s][^"]*$')
 
 
 class ConfigError(TinaError, ValueError):
@@ -130,6 +172,27 @@ class ArgvTemplate(BaseModel):
         return rendered
 
 
+class HarnessRetry(BaseModel):
+    """One class of harness failure worth re-running, and the waits to spend.
+
+    A model provider that sheds load exits the harness nonzero for a condition
+    that clears on its own. The rule names the output text that identifies
+    the condition and a ladder of waits — one retry per entry — so the run
+    survives the blip instead of failing the item. Rules are tried in the
+    order configured: put the most specific first, since a quota line often
+    also carries the words a capacity line does.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    markers: list[str] = Field(min_length=1)
+    waits: list[float] = Field(min_length=1)
+    reason: str = ""
+
+    def matches(self, text: str) -> bool:
+        return any(marker in text for marker in self.markers)
+
+
 class HarnessConfig(BaseModel):
     """How to invoke one agent harness."""
 
@@ -137,6 +200,11 @@ class HarnessConfig(BaseModel):
 
     name: str
     command: ArgvTemplate
+    # Output markers that mean "run it again", with the waits between tries.
+    # Empty means a nonzero exit is final. When any rule is set, the harness's
+    # output is relayed line by line so the markers can be seen — it still
+    # reaches the log, just not through Tina's stdout (which is JSON).
+    retry: list[HarnessRetry] = Field(default_factory=list)
 
 
 class CloudRunOptions(BaseModel):
@@ -146,10 +214,15 @@ class CloudRunOptions(BaseModel):
 
     project: str = Field(min_length=1)
     region: str = Field(min_length=1)
+    # May carry `{track}` for one job per track — how a deployment gives each
+    # track its own machine size and timeout without Tina knowing either.
     job: str = Field(min_length=1)
 
-    def job_path(self) -> str:
-        return f"projects/{self.project}/locations/{self.region}/jobs/{self.job}"
+    def job_name(self, track: str) -> str:
+        return self.job.replace(TRACK_PLACEHOLDER, track)
+
+    def job_path(self, track: str = "") -> str:
+        return f"projects/{self.project}/locations/{self.region}/jobs/{self.job_name(track)}"
 
 
 class ExecutorOptions(BaseModel):
@@ -172,8 +245,21 @@ class TrackConfig(BaseModel):
     mode: Literal["queue", "sweep"] = "queue"
     # Required for queue tracks; a sweep has neither, enforced in _check_mode.
     source: Literal["jira", "github"] | None = None
+    # The full tracker query. Given outright, or built from the structured
+    # inputs below (`tina.query`) when absent — never both.
     query: str = ""
     track: str
+    # Jira structured inputs: the project searched, the status an item must be
+    # in (the tracker's queued status, "Open" unless the workflow names it
+    # otherwise), one `"Field" in (...)` clause per filters entry, and an
+    # extra predicate appended as `AND (...)`.
+    project: str | None = None
+    status: str | None = Field(default=None, min_length=1)
+    filters: dict[str, list[str]] = Field(default_factory=dict)
+    extra: str | None = Field(default=None, min_length=1)
+    # GitHub structured input: labels an issue must carry, all of them. The
+    # repo is `repo`, required for the source anyway.
+    labels: list[str] = Field(default_factory=list)
     # A track is on by virtue of being present; false ships it without running
     # it. Disabled tracks are still fully validated so they cannot rot.
     enabled: bool = True
@@ -189,6 +275,14 @@ class TrackConfig(BaseModel):
     # The exclusion marker `block()` applies — a label on both trackers. The
     # track query has to exclude it, or blocked items match again (ADR-013).
     blocked_label: str = Field(default="tina-blocked", min_length=1)
+    # Jira only: `block()` transitions to this status instead of labeling. A
+    # status the query's own `status =` clause already excludes, so the query
+    # needs no label guard — and humans see the item where they expect it.
+    blocked_transition: str | None = Field(default=None, min_length=1)
+    # This track's own cap on live workers. A track that declares one is not
+    # bounded by the control file's `max_concurrency` — it opted out of the
+    # fleet knob — but `paused` still stops it like any other.
+    max_concurrency: int | None = Field(default=None, gt=0, strict=True)
     # What a bad run leaves on the item: "leave" retries it next cycle;
     # "annotate" comments the effective status and applies `blocked_label`.
     on_failure: Literal["leave", "annotate"] = "leave"
@@ -212,9 +306,57 @@ class TrackConfig(BaseModel):
             return self
         if self.source is None:
             raise ValueError('mode = "queue" requires source')
-        if not self.query:
-            raise ValueError('mode = "queue" requires query')
+        if self.source == "jira":
+            stray = sorted(set(_GITHUB_QUERY_KEYS) & self.model_fields_set)
+            if stray:
+                raise ValueError(f'{", ".join(stray)} only apply when source = "github"')
+            if not self.query and self.project is None:
+                raise ValueError('source = "jira" requires query or project')
+        else:
+            stray = sorted(set(_JIRA_QUERY_KEYS) & self.model_fields_set)
+            if stray:
+                raise ValueError(f'{", ".join(stray)} only apply when source = "jira"')
+            if self.blocked_transition is not None:
+                raise ValueError("blocked_transition only applies to jira tracks")
         return self
+
+    @field_validator("project")
+    @classmethod
+    def _check_project(cls, value: str | None) -> str | None:
+        if value is not None and not _JIRA_PROJECT.fullmatch(value):
+            raise ValueError(f"project {value!r} must be a Jira project key (letters, digits, _)")
+        return value
+
+    @field_validator("filters")
+    @classmethod
+    def _check_filters(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        for field, values in value.items():
+            if not _JIRA_FIELD.fullmatch(field):
+                raise ValueError(f"filter field {field!r} contains characters JQL cannot quote")
+            if not values:
+                raise ValueError(f"filter {field!r} must list at least one value")
+            for item in values:
+                if not _JIRA_VALUE.fullmatch(item):
+                    raise ValueError(
+                        f"filter value {item!r} for {field!r} may only contain letters, digits,"
+                        " spaces, and - _ ' & . : /"
+                    )
+        return value
+
+    @field_validator("repo")
+    @classmethod
+    def _check_repo(cls, value: str | None) -> str | None:
+        if value is not None and not _GITHUB_REPO.fullmatch(value):
+            raise ValueError(f'repo {value!r} must be "owner/name"')
+        return value
+
+    @field_validator("labels")
+    @classmethod
+    def _check_labels(cls, value: list[str]) -> list[str]:
+        for label in value:
+            if not _GITHUB_LABEL.fullmatch(label):
+                raise ValueError(f"label {label!r} may not contain quotes or start with whitespace")
+        return value
 
     @model_validator(mode="after")
     def _check_claim_policy(self) -> TrackConfig:
@@ -260,6 +402,14 @@ class Config(BaseModel):
     path: Path
     harness: str
     executor: str = "local"
+    # The models the harness may run, as the exact strings `{model}` takes.
+    # Empty means unconstrained. When set, every track's `model` and every
+    # `run --model` override must be one of them: a model the provider does
+    # not serve this deployment fails every run of the track that names it,
+    # from inside the harness where nobody is looking. The list is the one
+    # place that says which models this deployment has enabled — and what a
+    # live probe (`doctor`) has to prove answers.
+    models: list[str] = Field(default_factory=list)
     tracks_dir: Path = Path("tracks")
     # Where the control file lives, when the deployment does not use
     # TINA_CONTROL. None means no control plane configured here.
@@ -274,12 +424,36 @@ class Config(BaseModel):
     def harness_config(self) -> HarnessConfig:
         return self.harnesses[self.harness]
 
+    @field_validator("models")
+    @classmethod
+    def _check_models(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for model in value:
+            if not model or any(c.isspace() for c in model):
+                raise ValueError(f"model {model!r} must be non-empty and contain no whitespace")
+            if model in seen:
+                raise ValueError(f"model {model!r} is listed twice")
+            seen.add(model)
+        return value
+
+    def allows_model(self, model: str) -> bool:
+        """Whether `model` may run here: listed, or nothing is listed."""
+        return not self.models or model in self.models
+
     def track(self, name: str) -> TrackConfig:
-        try:
+        """The track table named, matched case-insensitively.
+
+        Schedulers and IaC tend to upper-case names on their way through an
+        environment variable; the table key is still the canonical spelling.
+        """
+        if name in self.tracks:
             return self.tracks[name]
-        except KeyError:
-            known = ", ".join(sorted(self.tracks)) or "none"
-            raise ConfigError(f"{self.path}: no track named {name!r} (defined: {known})") from None
+        lowered = name.lower()
+        for key, track in self.tracks.items():
+            if key.lower() == lowered:
+                return track
+        known = ", ".join(sorted(self.tracks)) or "none"
+        raise ConfigError(f"{self.path}: no track named {name!r} (defined: {known})")
 
     def cloudrun_options(self) -> CloudRunOptions:
         if self.executors.cloudrun is None:
@@ -309,8 +483,21 @@ class Config(BaseModel):
         return self.path.parent / self.artifacts_dir
 
 
-def load(path: Path | str) -> Config:
-    """Read and validate a config file. Fails fast with the file name in the message."""
+def load(
+    path: Path | str,
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+) -> Config:
+    """Read and validate a config file. Fails fast with the file name in the message.
+
+    The keyword overrides are the library caller's equivalent of the
+    `TINA_*` environment variables the CLI honors: a program embedding Tina
+    decides where its tracks, control file, and artifacts live under its own
+    names, and passes the paths here. An override wins over both the file and
+    the environment.
+    """
     path = Path(path)
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -327,11 +514,18 @@ def load(path: Path | str) -> Config:
                 " [harnesses.<name>] and [executors.<name>]"
             )
         raise ConfigError(f"{path}: invalid TOML: {exc}", fix=fix) from None
-    return parse(raw, path)
+    return parse(raw, path, tracks_dir=tracks_dir, control=control, artifacts_dir=artifacts_dir)
 
 
-def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
-    """Build a Config from an already-decoded TOML mapping."""
+def parse(
+    raw: dict[str, Any],
+    path: Path | str = "<config>",
+    *,
+    tracks_dir: Path | str | None = None,
+    control: Path | str | None = None,
+    artifacts_dir: Path | str | None = None,
+) -> Config:
+    """Build a Config from an already-decoded TOML mapping. Overrides as in `load`."""
     path = Path(path)
 
     if "harness" not in raw:
@@ -351,12 +545,19 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
                 f"{path}: unexpected top-level key {name!r}; expected one of "
                 f"{', '.join(sorted(_SCALAR_KEYS))} or a track table"
             )
-        tracks[name] = _build(
+        track = _build(
             TrackConfig,
             {"name": name, "track": name, **table},
             path,
             f"[{name}]",
         )
+        structured = sorted(set(_JIRA_QUERY_KEYS + _GITHUB_QUERY_KEYS) & set(table))
+        if table.get("query") and structured:
+            raise ConfigError(
+                f"{path}: [{name}]: query is a full override; remove it or the structured"
+                f" inputs ({', '.join(structured)})"
+            )
+        tracks[name] = _with_query(track)
 
     config = _build(
         Config,
@@ -364,9 +565,14 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
             "path": path,
             "harness": raw["harness"],
             "executor": raw.get("executor", "local"),
-            "tracks_dir": raw.get("tracks_dir", "tracks"),
-            "control": raw.get("control"),
-            "artifacts_dir": raw.get("artifacts_dir"),
+            "tracks_dir": tracks_dir
+            or os.environ.get(TRACKS_DIR_VAR)
+            or raw.get("tracks_dir", "tracks"),
+            "control": control or raw.get("control"),
+            "artifacts_dir": artifacts_dir
+            or os.environ.get(ARTIFACTS_DIR_VAR)
+            or raw.get("artifacts_dir"),
+            "models": raw.get("models", []),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
             "tracks": tracks,
@@ -377,6 +583,32 @@ def parse(raw: dict[str, Any], path: Path | str = "<config>") -> Config:
     _validate_names(config)
     _validate_model(config)
     return config
+
+
+def _with_query(track: TrackConfig) -> TrackConfig:
+    """Fill in the query a track gave the parts of. A sweep or a full override
+    passes through untouched."""
+    if track.mode == "sweep" or track.query:
+        return track
+    if track.source == "jira":
+        built = query_builders.jira_query(
+            str(track.project),
+            track.status,
+            track.filters,
+            track.extra,
+            claim_policy=track.claim,
+            claim_label=track.claim_label,
+            claim_transition=track.claim_transition,
+            blocked_label=None if track.blocked_transition else track.blocked_label,
+        )
+    else:
+        built = query_builders.github_query(
+            str(track.repo),
+            track.labels,
+            claim_label=track.claim_label if track.claim == "label" else None,
+            blocked_label=track.blocked_label,
+        )
+    return track.model_copy(update={"query": built})
 
 
 def _tables(value: Any, path: Path, key: str) -> list[tuple[str, dict[str, Any]]]:
@@ -421,11 +653,14 @@ def _validate_names(config: Config) -> None:
 
 
 def _validate_model(config: Config) -> None:
-    """Both mismatch directions between {model} and the track key fail at load.
+    """Both mismatch directions between {model} and the track key fail at load,
+    and so does a model the deployment has not listed.
 
     A command referencing {model} with no track value would run the agent with
     the literal `{model}` as an argument; a track value under a command that
-    never references it would silently not reach the harness.
+    never references it would silently not reach the harness; a track naming
+    a model outside `models` would fail every run at minute one of the
+    harness, with the error surfacing where nobody is looking.
     """
     uses_model = config.harness_config().command.uses("model")
     for track in config.tracks.values():
@@ -438,4 +673,10 @@ def _validate_model(config: Config) -> None:
             raise ConfigError(
                 f"{config.path}: [{track.name}]: model is set but harness"
                 f" {config.harness!r} never references {{model}}"
+            )
+        if track.model is not None and not config.allows_model(track.model):
+            raise ConfigError(
+                f"{config.path}: [{track.name}]: model {track.model!r} is not in `models`"
+                f" (listed: {', '.join(config.models)})",
+                fix="Add it to the top-level `models` list once the provider serves it here.",
             )

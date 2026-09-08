@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from tina.log import get_logger
 
@@ -36,13 +38,28 @@ log = get_logger(__name__)
 
 
 class Policy(BaseModel):
-    """The control file's schema. Strict, so a bool is never quietly an int."""
+    """The control file's schema. Strict, so a bool is never quietly an int.
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    An unknown top-level key fails closed — `pasued = true` must pause, not
+    run unthrottled. Tables are different: the file is the policy tier for the
+    whole deployment, and a deployment's own gates — a governor's mode, say —
+    belong beside `paused` without Tina having to know them. A table Tina does
+    not define passes through to `LoadedPolicy.extra`, verbatim; a scalar it
+    does not define is a typo.
+    """
+
+    model_config = ConfigDict(extra="allow", strict=True)
 
     paused: bool = False
     # None means no throttle: the caller's --limit stands alone.
     max_concurrency: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _unknown_scalars_are_typos(self) -> Policy:
+        stray = sorted(k for k, v in (self.model_extra or {}).items() if not isinstance(v, dict))
+        if stray:
+            raise ValueError(f"unknown key(s): {', '.join(stray)}")
+        return self
 
 
 @dataclass(frozen=True)
@@ -52,6 +69,9 @@ class LoadedPolicy:
     paused: bool
     max_concurrency: int | None
     origin: str
+    # Tables the file carried that Tina does not define, verbatim — a
+    # deployment's own gates, read by its own code.
+    extra: Mapping[str, Any] = field(default_factory=dict)
 
 
 DEFAULTS = LoadedPolicy(paused=False, max_concurrency=None, origin="defaults")
@@ -113,6 +133,7 @@ def _parse(text: str, origin: str) -> LoadedPolicy:
         paused=policy.paused,
         max_concurrency=_clamp(policy.max_concurrency),
         origin=origin,
+        extra=dict(policy.model_extra or {}),
     )
 
 

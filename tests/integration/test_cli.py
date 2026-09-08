@@ -102,6 +102,9 @@ class FakeSource:
     def block(self, item: WorkItem) -> None:
         self.blocked.append(item.id)
 
+    def login(self) -> str:
+        return "fake-bot"
+
 
 class NoClaimSource(FakeSource):
     """A tracker that fails the test if the claim it must not make is made.
@@ -1440,14 +1443,15 @@ def test_the_limit_stands_when_below_max_concurrency(
 def test_dispatch_without_a_control_plane_reports_its_own_limit(
     project: Path, wired: tuple[FakeSource, FakeExecutor]
 ) -> None:
-    """The new fields are always present; nothing else about the record changed."""
+    """With no --limit, no track cap, and no control file, the conservative
+    default applies and the record says so."""
     result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
     lines = json_lines(result.stdout)
     record = next(line for line in lines if line["message"] == "dispatching")
 
     assert result.exit_code == 0
-    assert record["effective_limit"] == 1
-    assert record["limit_origin"] == "--limit"
+    assert record["effective_limit"] == cli.DEFAULT_LIMIT == 1
+    assert record["limit_origin"] == "default"
     assert all(line["message"] != "control policy" for line in lines), "defaults log nothing"
 
 
@@ -1933,3 +1937,355 @@ def test_status_help_lists_the_track_option() -> None:
     assert result.exit_code == 0
     assert "--track" in plain(result.output)
     assert "--config" in plain(result.output)
+
+
+# --- TINA_CONFIG, --model, per-track max_concurrency --------------------------
+
+
+def test_tina_config_names_the_default_config_path(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(cli.CONFIG_VAR, str(project))
+    monkeypatch.chdir(project.parent.parent)
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul"])
+
+    assert result.exit_code == 0, result.stderr
+    assert wired[1].enqueued == [("vul", "VUL-1")]
+
+
+def test_config_flag_wins_over_tina_config(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(cli.CONFIG_VAR, "/nowhere/tina.toml")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0, result.stderr
+
+
+@pytest.fixture
+def modelled(project: Path) -> Path:
+    """The project with a harness that takes {model} and a track that sets one.
+
+    The fake agent records the model it was handed as a fourth argument.
+    """
+    text = project.read_text()
+    assert '"{prompt_file}", "{outcome_dir}"]' in text
+    text = text.replace(
+        '"{prompt_file}", "{outcome_dir}"]', '"{prompt_file}", "{outcome_dir}", "{model}"]'
+    ).replace('result = "github:pr"', 'result = "github:pr"\nmodel = "own-model"')
+    project.write_text(text)
+    script = project.parent / "agent.py"
+    script.write_text(AGENT + "pathlib.Path(sys.argv[2], 'model_seen').write_text(sys.argv[3])\n")
+    return project
+
+
+def test_model_overrides_the_tracks_own_for_one_run(
+    modelled: Path, monkeypatch: pytest.MonkeyPatch, records: io.StringIO
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+    seen: list[str | None] = []
+    real = harness.run
+
+    def spy(config, prompt, workdir, **kwargs):
+        seen.append(kwargs.get("model"))
+        return real(config, prompt, workdir, **kwargs)
+
+    monkeypatch.setattr(harness, "run", spy)
+
+    record = cli.run_item(config.load(modelled), "vul", "VUL-1", model="trial-model")
+
+    assert record is not None
+    assert seen == ["trial-model"]
+    override = next(
+        json.loads(r) for r in records.getvalue().splitlines() if '"model override"' in r
+    )
+    assert override["model"] == "trial-model" and override["own"] == "own-model"
+
+
+def test_model_is_refused_when_the_harness_never_takes_one(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "--track", "vul", "--item", "VUL-1", "--config", str(project), "--model", "x"],
+    )
+
+    assert result.exit_code == 1
+    assert "never references {model}" in plain(result.stderr)
+
+
+def test_model_with_whitespace_is_refused(modelled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "--track", "vul", "--item", "VUL-1", "--config", str(modelled), "--model", "a b"],
+    )
+
+    assert result.exit_code == 1
+    assert "no whitespace" in plain(result.stderr)
+
+
+def test_a_tracks_own_max_concurrency_is_the_ceiling(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    project.write_text(project.read_text() + "max_concurrency = 2\n")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+    record = next(r for r in json_lines(result.stdout) if r["message"] == "dispatching")
+
+    assert result.exit_code == 0
+    assert record["effective_limit"] == 2
+    assert record["limit_origin"] == "track max_concurrency"
+    assert [item for _, item in wired[1].enqueued] == ["VUL-1", "VUL-2"]
+
+
+def test_a_tracks_own_cap_opts_out_of_the_control_files(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project.write_text(project.read_text() + "max_concurrency = 3\n")
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 1")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+    record = next(r for r in json_lines(result.stdout) if r["message"] == "dispatching")
+
+    assert record["effective_limit"] == 3
+    assert record["limit_origin"] == "track max_concurrency"
+
+
+def test_paused_still_stops_a_track_with_its_own_cap(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project.write_text(project.read_text() + "max_concurrency = 3\n")
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert wired[1].enqueued == []
+
+
+def test_limit_still_lowers_a_tracks_own_cap(
+    project: Path, wired: tuple[FakeSource, FakeExecutor]
+) -> None:
+    project.write_text(project.read_text() + "max_concurrency = 3\n")
+
+    result = runner.invoke(
+        cli.app, ["dispatch", "--track", "vul", "--config", str(project), "--limit", "1"]
+    )
+    record = next(r for r in json_lines(result.stdout) if r["message"] == "dispatching")
+
+    assert record["effective_limit"] == 1
+    assert record["limit_origin"] == "--limit"
+
+
+def test_the_control_file_raises_the_cap_when_no_limit_is_given(
+    project: Path, wired: tuple[FakeSource, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no --limit there is no caller's ceiling to lower; the control file
+    is the only knob, and it sets the cap."""
+    monkeypatch.setenv("TINA_CONTROL_INLINE", "max_concurrency = 2")
+
+    result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])
+    record = next(r for r in json_lines(result.stdout) if r["message"] == "dispatching")
+
+    assert record["effective_limit"] == 2
+    assert record["limit_origin"] == "max_concurrency"
+    assert len(wired[1].enqueued) == 2
+
+
+# --- the governor seam --------------------------------------------------------
+
+
+class FakeGovernor:
+    def __init__(self, cap: int | None, fail: bool = False) -> None:
+        self._cap = cap
+        self.fail = fail
+        self.asked: list[tuple[str, int, int]] = []
+        self.recorded: list[dict[str, int | str]] = []
+
+    def cap(self, track: str, ceiling: int, in_flight: int) -> int | None:
+        if self.fail:
+            raise RuntimeError("metrics unavailable")
+        self.asked.append((track, ceiling, in_flight))
+        return self._cap
+
+    def record(self, track: str, **facts: int) -> None:
+        self.recorded.append({"track": track, **facts})
+
+
+def test_a_governor_lowers_the_cap_and_learns_what_happened(
+    project: Path, records: io.StringIO
+) -> None:
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor(in_flight=["VUL-9"])
+    governor = FakeGovernor(cap=2)
+    project.write_text(project.read_text() + "max_concurrency = 5\n")
+
+    cli.dispatch_track(
+        config.load(project), "vul", source=source, executor=executor, governor=governor
+    )
+
+    assert governor.asked == [("vul", 5, 1)]
+    assert [item for _, item in executor.enqueued] == ["VUL-1"], "cap 2 minus one in flight"
+    assert governor.recorded == [
+        {
+            "track": "vul",
+            "ceiling": 5,
+            "cap": 2,
+            "in_flight": 1,
+            "budget": 1,
+            "matched": 3,
+            "launched": 1,
+        }
+    ]
+    record = next(json.loads(r) for r in records.getvalue().splitlines() if '"dispatching"' in r)
+    assert record["limit_origin"] == "governor"
+    assert record["ceiling"] == 5
+
+
+def test_a_governor_can_only_lower_the_ceiling(project: Path) -> None:
+    source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
+    executor = FakeExecutor()
+    governor = FakeGovernor(cap=50)
+
+    cli.dispatch_track(
+        config.load(project), "vul", source=source, executor=executor, governor=governor
+    )
+
+    assert len(executor.enqueued) == cli.DEFAULT_LIMIT
+    assert governor.recorded[0]["cap"] == cli.DEFAULT_LIMIT
+
+
+def test_a_broken_governor_degrades_to_the_ceiling(project: Path, records: io.StringIO) -> None:
+    source = FakeSource(items("VUL-1", "VUL-2"))
+    executor = FakeExecutor()
+    governor = FakeGovernor(cap=0, fail=True)
+    project.write_text(project.read_text() + "max_concurrency = 2\n")
+
+    cli.dispatch_track(
+        config.load(project), "vul", source=source, executor=executor, governor=governor
+    )
+
+    assert len(executor.enqueued) == 2
+    assert "governor failed" in records.getvalue()
+    assert governor.recorded, "record still runs; the governor gets to see the cycle"
+
+
+# --- introspection and admission commands -----------------------------------
+
+
+def test_tracks_lists_names_and_disabled_state(project: Path) -> None:
+    project.write_text(project.read_text() + '\n[audit]\nmode = "sweep"\nenabled = false\n')
+
+    result = runner.invoke(cli.app, ["tracks", "--config", str(project)])
+
+    assert result.exit_code == 0
+    assert result.stdout == "audit (disabled)\nvul\n"
+
+
+def test_tracks_json_is_machine_readable(project: Path) -> None:
+    result = runner.invoke(cli.app, ["tracks", "--config", str(project), "--format", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["tracks"]["vul"]["source"] == "jira"
+
+
+def test_tracks_reports_a_bad_config(tmp_path: Path) -> None:
+    path = tmp_path / "tina.toml"
+    path.write_text("harness = [")
+
+    result = runner.invoke(cli.app, ["tracks", "--config", str(path)])
+
+    assert result.exit_code == 1
+    assert "invalid TOML" in plain(result.stderr)
+
+
+def test_config_options_needs_no_config() -> None:
+    result = runner.invoke(cli.app, ["config-options"])
+
+    assert result.exit_code == 0
+    assert "on_failure (" in result.stdout
+    assert "max_concurrency (" in result.stdout
+
+
+def test_config_options_markdown_and_json() -> None:
+    md = runner.invoke(cli.app, ["config-options", "--format", "markdown"])
+    js = runner.invoke(cli.app, ["config-options", "--format", "json"])
+
+    assert md.stdout.startswith("| Key |")
+    assert json.loads(js.stdout)["title"] == "TrackConfig"
+
+
+def test_validate_passes_a_conforming_project(project: Path) -> None:
+    (project.parent / "tracks" / "remediate" / "SKILL.md").write_text(
+        "---\nname: remediate\ndescription: Remediate the vulnerability.\n---\n\n# Remediate\n"
+    )
+
+    result = runner.invoke(cli.app, ["validate", "--config", str(project)])
+
+    assert result.exit_code == 0, result.stderr
+    assert "1 track(s) conform" in plain(result.stderr)
+    assert json_lines(result.stdout)[-1]["message"] == "validated"
+
+
+def test_validate_fails_on_a_broken_skill(project: Path) -> None:
+    result = runner.invoke(cli.app, ["validate", "--config", str(project)])
+
+    assert result.exit_code == 1
+    assert "missing or unterminated YAML frontmatter" in plain(result.stderr)
+
+
+def test_doctor_reports_each_probe_and_exits_on_a_failure(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Probe(FakeSource):
+        def login(self) -> str:
+            return "acting-bot"
+
+    wire(monkeypatch, Probe(items("VUL-1")))
+
+    result = runner.invoke(cli.app, ["doctor", "--config", str(project), "--skip-models"])
+    err = plain(result.stderr)
+
+    assert "✓ config loads" in err
+    assert "✓ [vul] jira credentials — acting as acting-bot" in err
+    assert "✓ [vul] query — 1 item(s) match now" in err
+    assert result.exit_code == 0, err
+
+
+def test_doctor_fails_when_a_probe_fails(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Refusing(FakeSource):
+        def login(self) -> str:
+            raise sources.base.SourceError("jira: 401", fix="Rotate the token.")
+
+    wire(monkeypatch, Refusing(items("VUL-1")))
+
+    result = runner.invoke(cli.app, ["doctor", "--config", str(project), "--skip-models"])
+
+    assert result.exit_code == 1
+    assert "✗ [vul] jira credentials — jira: 401 Rotate the token." in plain(result.stderr)
+
+
+def test_a_model_override_must_be_in_the_models_list(
+    modelled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override skips the track's choice, not the deployment's list."""
+    modelled.write_text(
+        modelled.read_text().replace('harness = "fake"', 'harness = "fake"\nmodels = ["own-model"]')
+    )
+    wire(monkeypatch, FakeSource(items("VUL-1")))
+
+    refused = runner.invoke(
+        cli.app,
+        ["run", "--track", "vul", "--item", "VUL-1", "--config", str(modelled), "--model", "trial"],
+    )
+    assert refused.exit_code == 1
+    assert "'trial' is not in `models`" in plain(refused.stderr)
+
+    record = cli.run_item(config.load(modelled), "vul", "VUL-1", model="own-model")
+    assert record is not None

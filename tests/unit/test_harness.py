@@ -4,11 +4,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tina import harness
-from tina.config import ArgvTemplate, HarnessConfig
+from tina.config import ArgvTemplate, HarnessConfig, HarnessRetry
 from tina.models import OutcomeStatus
 
 
@@ -261,3 +262,175 @@ def test_a_bogus_artifact_url_is_a_broken_report(tmp_path: Path) -> None:
 
     assert report.outcome is OutcomeStatus.FAILED
     assert "invalid outcome.json" in report.details
+
+
+# --- retry rules -------------------------------------------------------------
+
+
+def retrying(*args: str, rules: list[dict[str, Any]]) -> HarnessConfig:
+    return HarnessConfig(
+        name="fake",
+        command=ArgvTemplate(args=list(args)),
+        retry=[HarnessRetry.model_validate(rule) for rule in rules],
+    )
+
+
+def test_a_marked_failure_is_retried_and_the_agent_eventually_succeeds(tmp_path: Path) -> None:
+    """The fake fails with the marker until a counter file says it has been run
+    twice, then writes the outcome. The retry ladder has to be spent for the run
+    to end resolved."""
+    counter = tmp_path / "attempts"
+    fake = script(
+        tmp_path,
+        "import pathlib, sys\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "n = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+        "counter.write_text(str(n))\n"
+        "if n < 3:\n"
+        "    print('provider said: overloaded_error, try later')\n"
+        "    sys.exit(1)\n"
+        "pathlib.Path(sys.argv[2], 'outcome.json').write_text("
+        '\'{"outcome": "resolved", "details": "third time lucky"}\')\n',
+    )
+    waits: list[float] = []
+
+    result = harness.run(
+        retrying(
+            sys.executable,
+            str(fake),
+            "{prompt_file}",
+            "{outcome_dir}",
+            rules=[{"markers": ["overloaded_error"], "waits": [30, 120], "reason": "capacity"}],
+        ),
+        "go",
+        tmp_path / "run",
+        sleep=waits.append,
+    )
+
+    assert result.exit_code == 0
+    assert result.report.outcome is OutcomeStatus.RESOLVED
+    assert waits == [30.0, 120.0], "one wait per retry, in ladder order"
+    assert counter.read_text() == "3"
+
+
+def test_the_ladder_runs_out_and_the_failure_stands(tmp_path: Path) -> None:
+    fake = script(tmp_path, "print('RESOURCE_EXHAUSTED'); raise SystemExit(2)")
+    waits: list[float] = []
+
+    result = harness.run(
+        retrying(
+            sys.executable,
+            str(fake),
+            "{prompt_file}",
+            "{outcome_dir}",
+            rules=[{"markers": ["RESOURCE_EXHAUSTED"], "waits": [1]}],
+        ),
+        "go",
+        tmp_path / "run",
+        sleep=waits.append,
+    )
+
+    assert result.exit_code == 2
+    assert result.report.outcome is OutcomeStatus.FAILED
+    assert waits == [1.0]
+
+
+def test_an_unmarked_failure_is_not_retried(tmp_path: Path) -> None:
+    fake = script(tmp_path, "print('something else entirely'); raise SystemExit(1)")
+    waits: list[float] = []
+
+    result = harness.run(
+        retrying(
+            sys.executable,
+            str(fake),
+            "{prompt_file}",
+            "{outcome_dir}",
+            rules=[{"markers": ["overloaded_error"], "waits": [30]}],
+        ),
+        "go",
+        tmp_path / "run",
+        sleep=waits.append,
+    )
+
+    assert result.exit_code == 1
+    assert waits == []
+
+
+def test_the_first_matching_rule_in_config_order_wins(tmp_path: Path) -> None:
+    """A quota line also carries the capacity marker; the specific rule, listed
+    first, decides the wait."""
+    fake = script(
+        tmp_path,
+        "print('Quota exceeded for the model API: RESOURCE_EXHAUSTED')\nraise SystemExit(1)",
+    )
+    waits: list[float] = []
+
+    harness.run(
+        retrying(
+            sys.executable,
+            str(fake),
+            "{prompt_file}",
+            "{outcome_dir}",
+            rules=[
+                {"markers": ["Quota exceeded"], "waits": [60]},
+                {"markers": ["RESOURCE_EXHAUSTED"], "waits": [5]},
+            ],
+        ),
+        "go",
+        tmp_path / "run",
+        sleep=waits.append,
+    )
+
+    assert waits == [60.0]
+
+
+def test_relayed_output_lands_on_stderr(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    fake = script(tmp_path, "print('agent says hello'); raise SystemExit(0)")
+
+    harness.run(
+        retrying(
+            sys.executable,
+            str(fake),
+            "{prompt_file}",
+            "{outcome_dir}",
+            rules=[{"markers": ["never"], "waits": [1]}],
+        ),
+        "go",
+        tmp_path / "run",
+    )
+
+    out, err = capfd.readouterr()
+    assert "agent says hello" in err
+    assert "agent says hello" not in out, "stdout is Tina's JSON records"
+
+
+# --- capture scrubs ------------------------------------------------------------
+
+
+def test_capture_scrubs_credentials_from_text_artifacts(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    token = "ghp_" + "Z" * 36
+    (session / "transcript.jsonl").write_text(f'{{"env": "GH_TOKEN={token}"}}\n')
+    (session / "blob.bin").write_bytes(token.encode())
+    artifacts = tmp_path / "artifacts"
+
+    harness.capture(session, artifacts, "VUL-1")
+
+    copied = (artifacts / "VUL-1" / "transcript.jsonl").read_text()
+    assert token not in copied
+    assert "<REDACTED:github-token>" in copied
+    assert (artifacts / "VUL-1" / "blob.bin").read_bytes() == token.encode(), (
+        "binary passes through"
+    )
+
+
+def test_capture_flattens_a_qualified_item_id(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    (session / "t.jsonl").write_text("{}\n")
+
+    harness.capture(session, tmp_path / "artifacts", "acme/api#42")
+
+    assert (tmp_path / "artifacts" / "acme__api#42" / "t.jsonl").is_file()
+    assert harness.artifact_name("VUL-1") == "VUL-1"
