@@ -322,6 +322,13 @@ query. All judgment about what the item actually is happens inside the track.
 | `login()` | `doctor` | one authenticated read — who the credentials act as — and nothing else |
 | `normalize(payload)` | deferred | turn an inbound webhook payload into a work item |
 
+> **Proposed:** connectors become executables speaking these nine calls as a
+> small JSON-RPC protocol over stdio, configured like harnesses
+> (`[sources.<name>] command = [...]`), so a connector can be written in any
+> language and live outside this repository —
+> [ADR-019](adr/019-connectors-are-processes.md),
+> [connector-protocol.md](connector-protocol.md).
+
 Credentials come from the environment: `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`; `GITHUB_TOKEN`, or `GH_TOKEN` — the GitHub CLI's spelling —
 when that is what the image already carries. The bot's own identity is
