@@ -160,8 +160,10 @@ def offline_verify(monkeypatch: pytest.MonkeyPatch) -> None:
 
     real = verify.verify
 
-    def offline(report: OutcomeReport, client: httpx.Client | None = None) -> OutcomeReport:
-        return real(report, httpx.Client(transport=httpx.MockTransport(handler)))
+    def offline(
+        report: OutcomeReport, client: httpx.Client | None = None, check=None
+    ) -> OutcomeReport:
+        return real(report, httpx.Client(transport=httpx.MockTransport(handler)), check=check)
 
     monkeypatch.setattr(verify, "verify", offline)
 
@@ -189,14 +191,14 @@ def wired(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeSource, FakeExecutor]:
     """Point the adapter factories at fakes, so the real argv path can be driven."""
     source = FakeSource(items("VUL-1", "VUL-2", "VUL-3"))
     executor = FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None, **kw: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
     return source, executor
 
 
 def wire(monkeypatch: pytest.MonkeyPatch, source: FakeSource) -> FakeSource:
     """Point `sources.build` at one specific fake, and hand it back."""
-    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None, **kw: source)
     return source
 
 
@@ -385,7 +387,7 @@ def disabled(project: Path) -> Path:
 def test_dispatch_refuses_a_disabled_track(disabled: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A silent no-op would look identical to an empty backlog."""
     source, executor = NoQuerySource(items("VUL-1")), FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None, **kw: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
 
     result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(disabled)])
@@ -641,7 +643,7 @@ def test_a_dry_run_with_no_matches_exits_zero(
 ) -> None:
     """Zero matches is a valid preview, not an error."""
     source, executor = FakeSource([]), FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None, **kw: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
 
     result = runner.invoke(
@@ -1382,7 +1384,7 @@ def test_a_paused_dispatch_exits_zero_and_enqueues_nothing(
     """Paused is working as intended, not an error."""
     monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = true")
     source, executor = NoQuerySource(items("VUL-1")), FakeExecutor()
-    monkeypatch.setattr(sources, "build", lambda track, client=None: source)
+    monkeypatch.setattr(sources, "build", lambda track, client=None, **kw: source)
     monkeypatch.setattr(executors, "build", lambda config: executor)
 
     result = runner.invoke(cli.app, ["dispatch", "--track", "vul", "--config", str(project)])

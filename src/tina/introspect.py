@@ -88,6 +88,10 @@ DESCRIPTIONS: dict[str, str] = {
         "Literal strings merged over the inherited environment for the harness subprocess "
         "only. Uppercase names; `TINA_*` is reserved."
     ),
+    "options": (
+        "Connector tracks only: the table handed to the connector process at `initialize`, "
+        "which validates it. Opaque to tina; see docs/connector-protocol.md."
+    ),
 }
 
 

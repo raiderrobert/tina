@@ -327,7 +327,10 @@ query. All judgment about what the item actually is happens inside the track.
 > (`[sources.<name>] command = [...]`), so a connector can be written in any
 > language and live outside this repository —
 > [ADR-019](adr/019-connectors-are-processes.md),
-> [connector-protocol.md](connector-protocol.md).
+> [connector-protocol.md](connector-protocol.md). A `[sources.<name>]` table
+> shadows the built-in adapter of the same name: `tina-source-github`, shipped
+> with Tina, is the first connector through the door (`tina.connector` is the
+> client and the server loop; `tina.connectors.github` the connector).
 
 Credentials come from the environment: `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`; `GITHUB_TOKEN`, or `GH_TOKEN` — the GitHub CLI's spelling —

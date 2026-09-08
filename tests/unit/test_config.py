@@ -832,3 +832,67 @@ def test_no_models_list_means_unconstrained(tmp_path: Path) -> None:
 def test_models_entries_are_validated(tmp_path: Path, value: str, message: str) -> None:
     with pytest.raises(config.ConfigError, match=message):
         config.load(write(tmp_path, MODELLED.replace('models = ["fast", "frontier"]', value)))
+
+
+# --- connector processes: [sources.<name>] and [<track>.options] -----------------
+
+CONNECTED = """
+harness = "pi"
+
+[harnesses.pi]
+command = ["pi", "-p", "@{prompt_file}"]
+
+[sources.acme]
+command = ["tina-source-acme", "--verbose"]
+timeout = 15
+
+[bug]
+source = "acme"
+claim = "label"
+claim_label = "taken"
+
+[bug.options]
+project = "BUG"
+teams = ["a", "b"]
+"""
+
+
+def test_a_sources_table_names_a_connector_process(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, CONNECTED))
+    connector = cfg.connector(cfg.track("bug"))
+
+    assert connector is not None
+    assert connector.command == ["tina-source-acme", "--verbose"]
+    assert connector.timeout == 15
+    assert cfg.track("bug").options == {"project": "BUG", "teams": ["a", "b"]}
+    assert cfg.track("bug").query == "", "left for the connector's build_query"
+
+
+def test_a_built_in_source_has_no_connector(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL))
+    assert cfg.connector(cfg.track("vul")) is None
+
+
+def test_an_unknown_source_names_the_known_ones(tmp_path: Path) -> None:
+    text = CONNECTED.replace('source = "acme"', 'source = "acmee"')
+    with pytest.raises(
+        config.ConfigError, match=r"unknown source 'acmee' \(known: acme, github, jira\)"
+    ):
+        config.load(write(tmp_path, text))
+
+
+def test_built_in_keys_are_refused_on_a_connector_track(tmp_path: Path) -> None:
+    text = CONNECTED.replace('claim_label = "taken"', 'claim_label = "taken"\nrepo = "a/b"')
+    with pytest.raises(config.ConfigError, match="repo are built-in source keys"):
+        config.load(write(tmp_path, text))
+
+
+def test_options_are_refused_on_a_built_in_source(tmp_path: Path) -> None:
+    with pytest.raises(config.ConfigError, match="options only applies to a connector"):
+        config.load(write(tmp_path, MINIMAL + "[vul.options]\nx = 1\n"))
+
+
+def test_a_sources_table_needs_a_command(tmp_path: Path) -> None:
+    text = CONNECTED.replace('command = ["tina-source-acme", "--verbose"]\n', "")
+    with pytest.raises(config.ConfigError, match=r"\[sources.acme\].*command"):
+        config.load(write(tmp_path, text))

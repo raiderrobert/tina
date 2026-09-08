@@ -318,9 +318,10 @@ def dispatch_track(
         return
 
     effective, limit_origin = _effective_limit(limit, track, policy)
-    source = source or sources.build(track)
+    source = source or sources.build(track, config=config)
+    query = _query_for(track, source)
     if dry_run:
-        items = source.query(track.query)[: max(effective, 0)]
+        items = source.query(query)[: max(effective, 0)]
         _preview(config, track, items, limit, effective, limit_origin, policy)
         return
 
@@ -328,7 +329,7 @@ def dispatch_track(
     in_flight = executor.running(track.name)
     cap, cap_origin = _governed(governor, track.name, effective, len(in_flight), limit_origin)
     budget = max(0, cap - len(in_flight))
-    items = source.query(track.query)
+    items = source.query(query)
     logger.info(
         "dispatching",
         extra={
@@ -390,6 +391,21 @@ def _report_to_governor(governor: Governor | None, track: str, **facts: int) -> 
         governor.record(track, **facts)
     except Exception as exc:
         logger.warning("governor record failed", extra={"track": track, "error": str(exc)})
+
+
+def _query_for(track: TrackConfig, source: Source) -> str:
+    """The track's query — its own, or the one its connector builds from the
+    track's options when the track sets none (ADR-019 `build_query`)."""
+    if track.query:
+        return track.query
+    build = getattr(source, "build_query", None)
+    built = build() if callable(build) else None
+    if not built:
+        raise ConfigError(
+            f"track {track.name!r} sets no query and its source offers no build_query",
+            fix="Set query on the track, or give the connector the options it builds one from.",
+        )
+    return str(built)
 
 
 def _require_enabled(config: Config, track: TrackConfig) -> None:
@@ -623,10 +639,11 @@ def status_track(config: Config, track_name: str, source: Source | None = None) 
             f"{config.path}: track {track.name!r} is a sweep track — there is no queue to count",
             fix="Status reads the source query; sweep tracks have none.",
         )
-    source = source or sources.build(track)
+    source = source or sources.build(track, config=config)
+    query = _query_for(track, source)
 
-    unclaimed = len(source.query(track.query))
-    in_flight = len(source.claimed(track.query))
+    unclaimed = len(source.query(query))
+    in_flight = len(source.claimed(query))
 
     logger.info(
         "status",
@@ -684,11 +701,12 @@ def run_item(
             fix='Pass --item <id>, or set mode = "sweep" on the track.',
         )
 
-    source = source or sources.build(track)
+    source = source or sources.build(track, config=config)
+    query = _query_for(track, source)
 
     item = source.get(item_id)
     if dry_run:
-        _preview_run(config, track, source, item, started)
+        _preview_run(config, track, source, item, started, query)
         return None
 
     executor = executor or executors.build(config)
@@ -697,7 +715,7 @@ def run_item(
     # The eligibility re-check (ADR-014): between dispatch and worker start the
     # item can be assigned, closed, labeled, or worked by a human. Before any
     # write, for every track — under claim = "none" it is the only guard.
-    if not source.matches(item.id, track.query):
+    if not source.matches(item.id, query):
         logger.info("no longer matches", extra={"track": track.name, "item": item.id})
         return _record(
             track.name,
@@ -732,7 +750,7 @@ def run_item(
         result = harness.run(harness_config, text, workdir, model=track.model, env=track.env)
         harness.capture(result.session_dir, config.artifacts_path(), item.id)
 
-    report = verify.verify(result.report)
+    report = verify.verify(result.report, check=getattr(source, "verify_artifact", None))
     record = _record(track.name, item.id, report, result.exit_code, started, run_url)
     _write_back(track, source, item, record)
     return record
@@ -805,6 +823,7 @@ def _preview_run(
     source: Source,
     item: WorkItem,
     started: float,
+    query: str | None = None,
 ) -> None:
     """The dry-run half of `run_item`: the real read-only prefix, then a plan.
 
@@ -819,7 +838,7 @@ def _preview_run(
     fields: dict[str, Any] = {"dry_run": True, "track": track.name, "item": item.id}
     output.dry_run_header("nothing will be claimed and no agent will run")
 
-    fields["matches"] = source.matches(item.id, track.query)
+    fields["matches"] = source.matches(item.id, query if query is not None else track.query)
     if not fields["matches"]:
         output.would(
             f"Would not run {item.id} — it no longer matches the track query;"

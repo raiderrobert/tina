@@ -113,7 +113,7 @@ def diagnose(*args, **kwargs) -> list[doctor.Check]:
 
 
 def test_a_healthy_deployment_passes_every_probe(tmp_path: Path) -> None:
-    checks = by_name(diagnose(project(tmp_path), build_source=lambda track: FakeSource()))
+    checks = by_name(diagnose(project(tmp_path), build_source=lambda track, **kw: FakeSource()))
 
     assert all(check.ok for check in checks.values()), checks
     assert checks["harness 'fake' on PATH"].detail.endswith("python3")
@@ -128,7 +128,8 @@ def test_a_healthy_deployment_passes_every_probe(tmp_path: Path) -> None:
 def test_a_missing_harness_binary_fails_that_probe_only(tmp_path: Path) -> None:
     checks = by_name(
         diagnose(
-            project(tmp_path, binary="no-such-harness"), build_source=lambda track: FakeSource()
+            project(tmp_path, binary="no-such-harness"),
+            build_source=lambda track, **kw: FakeSource(),
         )
     )
 
@@ -139,7 +140,7 @@ def test_a_missing_harness_binary_fails_that_probe_only(tmp_path: Path) -> None:
 
 def test_refused_credentials_stop_before_the_query(tmp_path: Path) -> None:
     checks = by_name(
-        diagnose(project(tmp_path), build_source=lambda track: FakeSource(refuse=True))
+        diagnose(project(tmp_path), build_source=lambda track, **kw: FakeSource(refuse=True))
     )
 
     assert not checks["[vul] jira credentials"].ok
@@ -150,7 +151,7 @@ def test_refused_credentials_stop_before_the_query(tmp_path: Path) -> None:
 
 def test_a_missing_skill_is_reported(tmp_path: Path) -> None:
     checks = by_name(
-        diagnose(project(tmp_path, skills=False), build_source=lambda track: FakeSource())
+        diagnose(project(tmp_path, skills=False), build_source=lambda track, **kw: FakeSource())
     )
 
     assert not checks["[vul] skill"].ok
@@ -162,7 +163,7 @@ def test_an_invalid_control_file_reads_as_failing_closed(
 ) -> None:
     monkeypatch.setenv("TINA_CONTROL_INLINE", "paused = maybe")
 
-    checks = by_name(diagnose(project(tmp_path), build_source=lambda track: FakeSource()))
+    checks = by_name(diagnose(project(tmp_path), build_source=lambda track, **kw: FakeSource()))
 
     assert not checks["control policy"].ok
     assert "failing closed" in checks["control policy"].detail
@@ -181,7 +182,7 @@ def test_a_bad_config_is_the_only_check(tmp_path: Path) -> None:
 
 def test_only_narrows_to_one_track(tmp_path: Path) -> None:
     checks = by_name(
-        diagnose(project(tmp_path), only="audit", build_source=lambda track: FakeSource())
+        diagnose(project(tmp_path), only="audit", build_source=lambda track, **kw: FakeSource())
     )
 
     assert "[audit] skill" in checks
@@ -197,7 +198,7 @@ def test_path_overrides_reach_the_probes(tmp_path: Path, monkeypatch: pytest.Mon
     checks = by_name(
         diagnose(
             path,
-            build_source=lambda track: FakeSource(),
+            build_source=lambda track, **kw: FakeSource(),
             tracks_dir=elsewhere,
             control=tmp_path / "control.toml",
         )
@@ -221,7 +222,9 @@ def answering(tmp_path: Path) -> Path:
 
 
 def test_every_listed_model_is_probed_through_the_harness(tmp_path: Path) -> None:
-    checks = by_name(doctor.diagnose(answering(tmp_path), build_source=lambda track: FakeSource()))
+    checks = by_name(
+        doctor.diagnose(answering(tmp_path), build_source=lambda track, **kw: FakeSource())
+    )
 
     assert checks["model 'fast' answers"].ok
     assert checks["model 'fast' answers"].detail == ""
@@ -235,7 +238,7 @@ def test_a_model_that_does_not_answer_fails_its_probe(tmp_path: Path) -> None:
         path.read_text().replace('models = ["fast", "slow"]', 'models = ["fast", "dead"]')
     )
 
-    checks = by_name(doctor.diagnose(path, build_source=lambda track: FakeSource()))
+    checks = by_name(doctor.diagnose(path, build_source=lambda track, **kw: FakeSource()))
 
     assert not checks["model 'dead' answers"].ok
     assert checks["model 'dead' answers"].detail == "exit 2: no such model"
@@ -246,7 +249,7 @@ def test_without_a_models_list_the_tracks_models_are_probed(tmp_path: Path) -> N
     path = answering(tmp_path)
     path.write_text(path.read_text().replace('models = ["fast", "slow"]\n', ""))
 
-    checks = by_name(doctor.diagnose(path, build_source=lambda track: FakeSource()))
+    checks = by_name(doctor.diagnose(path, build_source=lambda track, **kw: FakeSource()))
 
     assert "model 'fast' answers" in checks
     assert "model 'slow' answers" not in checks
@@ -256,11 +259,11 @@ def test_probes_are_skipped_on_request_and_when_the_harness_is_missing(tmp_path:
     path = answering(tmp_path)
 
     skipped = by_name(
-        doctor.diagnose(path, build_source=lambda track: FakeSource(), probe_models=False)
+        doctor.diagnose(path, build_source=lambda track, **kw: FakeSource(), probe_models=False)
     )
     assert not any(name.startswith("model ") for name in skipped)
 
     path.write_text(path.read_text().replace(sys.executable, "no-such-harness"))
-    missing = by_name(doctor.diagnose(path, build_source=lambda track: FakeSource()))
+    missing = by_name(doctor.diagnose(path, build_source=lambda track, **kw: FakeSource()))
     assert not missing["harness 'fake' on PATH"].ok
     assert not any(name.startswith("model ") for name in missing), "nothing to probe with"
