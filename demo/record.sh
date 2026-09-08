@@ -97,12 +97,18 @@ export TINA
 # command is `./queue.sh` with no path, and the checkout stays clean.
 sh "$DEMO_DIR/workdir.sh" "$WORK"
 
-# The track's repo and query, read out of the derived config by workdir.sh, so
-# queue.sh shows the rows dispatch is about to claim rather than its own copy.
+# The track's repo, read out of the derived config by workdir.sh, and its
+# query, rendered by tina from the same config -- nothing in the file spells
+# it -- so queue.sh shows the rows dispatch is about to claim rather than its
+# own copy.
 . "$WORK/.demo-env"
-export DEMO_REPO DEMO_QUERY
-
 cd "$WORK"
+DEMO_QUERY=$($TINA tracks --format json | jq -r '.tracks.bug.query')
+[ -n "$DEMO_QUERY" ] && [ "$DEMO_QUERY" != null ] || {
+    echo "record.sh: tina tracks did not render a query for track 'bug'" >&2
+    exit 1
+}
+export DEMO_REPO DEMO_QUERY
 
 asciinema rec --overwrite --quiet --headless --return \
     --window-size "${COLS}x${ROWS}" --idle-time-limit 1 \

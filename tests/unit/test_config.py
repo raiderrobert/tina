@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from tina import config
+from tina.query import Query
+from tina.sources import render
 
 MINIMAL = """
 harness = "pi"
@@ -14,7 +16,7 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 """
 
 
@@ -89,7 +91,10 @@ def test_a_disabled_track_is_still_fully_validated(tmp_path: Path) -> None:
 
 
 def test_a_disabled_github_track_still_requires_repo(tmp_path: Path) -> None:
-    text = MINIMAL.replace('source = "jira"', 'source = "github"') + "\nenabled = false\n"
+    text = (
+        MINIMAL.replace('source = "jira"\nproject = "VUL"', 'source = "github"')
+        + "\nenabled = false\n"
+    )
     with pytest.raises(config.ConfigError, match="requires repo"):
         config.load(write(tmp_path, text))
 
@@ -141,7 +146,7 @@ def test_a_model_command_requires_model_on_every_track(tmp_path: Path) -> None:
     text = (
         MODEL_COMMAND
         + '\nmodel = "claude-sonnet-x"\n'
-        + '\n[bug]\nsource = "jira"\nquery = "project = BUGS"\n'
+        + '\n[bug]\nsource = "jira"\nproject = "BUGS"\n'
     )
     with pytest.raises(config.ConfigError, match=r"\[bug\].*\{model\}"):
         config.load(write(tmp_path, text))
@@ -218,7 +223,7 @@ def test_claim_transition_is_kept_on_a_jira_track(tmp_path: Path) -> None:
 def test_claim_transition_on_a_github_track_fails_fast(tmp_path: Path) -> None:
     """GitHub Issues has no workflow to transition."""
     text = (
-        MINIMAL.replace('source = "jira"', 'source = "github"\nrepo = "acme/api"')
+        MINIMAL.replace('source = "jira"\nproject = "VUL"', 'source = "github"\nrepo = "acme/api"')
         + '\nclaim_transition = "In Progress"\n'
     )
     with pytest.raises(config.ConfigError, match=r"\[vul\].*claim_transition"):
@@ -265,7 +270,7 @@ def test_an_unknown_mode_fails_fast(tmp_path: Path) -> None:
     "key",
     [
         'source = "jira"',
-        'query = "project = VUL"',
+        'project = "VUL"',
         'repo = "acme/api"',
         'claim = "none"',
         'claim_label = "bot-claimed"',
@@ -282,8 +287,8 @@ def test_a_queue_key_on_a_sweep_entry_fails_at_load(tmp_path: Path, key: str) ->
 
 
 def test_every_stray_queue_key_is_named_together(tmp_path: Path) -> None:
-    text = SWEEP + 'source = "jira"\nquery = "project = VUL"\non_failure = "annotate"\n'
-    with pytest.raises(config.ConfigError, match="on_failure, query, source"):
+    text = SWEEP + 'source = "jira"\nproject = "VUL"\non_failure = "annotate"\n'
+    with pytest.raises(config.ConfigError, match="on_failure, project, source"):
         config.load(write(tmp_path, text))
 
 
@@ -353,7 +358,7 @@ def test_unknown_key_in_a_track_fails_fast(tmp_path: Path) -> None:
 
 
 def test_github_track_requires_repo(tmp_path: Path) -> None:
-    text = MINIMAL.replace('source = "jira"', 'source = "github"')
+    text = MINIMAL.replace('source = "jira"\nproject = "VUL"', 'source = "github"')
     with pytest.raises(config.ConfigError, match="requires repo"):
         config.load(write(tmp_path, text))
 
@@ -378,13 +383,19 @@ def test_unknown_harness_fails_fast(tmp_path: Path) -> None:
 
 def test_missing_harness_key(tmp_path: Path) -> None:
     with pytest.raises(config.ConfigError, match="missing required top-level key 'harness'"):
-        config.load(write(tmp_path, "[vul]\nsource = 'jira'\nquery = 'x'\n"))
+        config.load(write(tmp_path, "[vul]\nsource = 'jira'\nproject = 'X'\n"))
 
 
-def test_missing_query_names_the_track(tmp_path: Path) -> None:
-    text = MINIMAL.replace('query = "project = VUL"', "")
-    with pytest.raises(config.ConfigError, match=r"\[vul\]"):
+def test_missing_project_names_the_track(tmp_path: Path) -> None:
+    text = MINIMAL.replace('project = "VUL"', "")
+    with pytest.raises(config.ConfigError, match=r"\[vul\].*requires project"):
         config.load(write(tmp_path, text))
+
+
+def test_a_raw_query_key_points_at_the_parts(tmp_path: Path) -> None:
+    """The removed key gets a pointer, not \"extra inputs are not permitted\"."""
+    with pytest.raises(config.ConfigError, match="query is not a key; give the parts"):
+        config.load(write(tmp_path, MINIMAL + '\nquery = "project = VUL"\n'))
 
 
 def test_unknown_track_lists_the_known_ones(tmp_path: Path) -> None:
@@ -515,7 +526,7 @@ def test_an_unknown_executor_table_is_rejected(tmp_path: Path) -> None:
         config.load(write(tmp_path, text))
 
 
-# --- structured query inputs -------------------------------------------------
+# --- query parts -> tina.query.Query, rendered per source --------------------
 
 JIRA_PARTS = """
 harness = "pi"
@@ -533,10 +544,16 @@ Team = ["Payments", "Search"]
 """
 
 
-def test_jira_structured_inputs_build_the_query(tmp_path: Path) -> None:
+def test_jira_parts_build_the_query(tmp_path: Path) -> None:
     cfg = config.load(write(tmp_path, JIRA_PARTS))
 
-    assert cfg.track("vul").query == (
+    assert cfg.track("vul").query == Query(
+        scope="VUL",
+        fields={"Team": ("Payments", "Search")},
+        labels_none=("tina-blocked",),
+        extra="labels not in (wontfix)",
+    )
+    assert render(cfg.track("vul")) == (
         'project = VUL AND status = "Open" AND "Team" in ("Payments", "Search")'
         ' AND assignee IS EMPTY AND (labels IS EMPTY OR labels not in ("tina-blocked"))'
         " AND (labels not in (wontfix)) ORDER BY created ASC"
@@ -547,9 +564,14 @@ def test_a_blocked_transition_drops_the_label_guard_from_the_built_query(tmp_pat
     text = JIRA_PARTS.replace('project = "VUL"', 'project = "VUL"\nblocked_transition = "Blocked"')
     cfg = config.load(write(tmp_path, text))
 
-    assert 'labels not in ("tina-blocked")' not in cfg.track("vul").query
-    assert "(labels not in (wontfix))" in cfg.track("vul").query, "extra still applies"
+    assert cfg.track("vul").query.labels_none == ()
+    assert cfg.track("vul").query.extra == "labels not in (wontfix)", "extra still applies"
     assert cfg.track("vul").blocked_transition == "Blocked"
+
+
+def test_the_query_is_not_a_config_key(tmp_path: Path) -> None:
+    """Nothing in the file spells it, so the options listing must not offer it."""
+    assert "query" not in config.TrackConfig.model_fields
 
 
 def test_github_structured_inputs_build_the_query(tmp_path: Path) -> None:
@@ -568,24 +590,15 @@ claim_label = "bot-claimed"
 """
     cfg = config.load(write(tmp_path, text))
 
-    assert cfg.track("smoke").query == (
+    assert cfg.track("smoke").query == Query(
+        scope="acme/api",
+        labels_all=("needs-triage",),
+        labels_none=("tina-blocked", "bot-claimed"),
+    )
+    assert render(cfg.track("smoke")) == (
         'repo:acme/api is:issue is:open no:assignee label:"needs-triage"'
         ' -label:"tina-blocked" -label:"bot-claimed"'
     )
-
-
-def test_query_and_structured_inputs_are_mutually_exclusive(tmp_path: Path) -> None:
-    text = JIRA_PARTS.replace('project = "VUL"', 'project = "VUL"\nquery = "project = VUL"')
-
-    with pytest.raises(config.ConfigError, match="query is a full override"):
-        config.load(write(tmp_path, text))
-
-
-def test_a_jira_track_needs_a_query_or_a_project(tmp_path: Path) -> None:
-    text = MINIMAL.replace('query = "project = VUL"', "")
-
-    with pytest.raises(config.ConfigError, match="requires query or project"):
-        config.load(write(tmp_path, text))
 
 
 @pytest.mark.parametrize(
@@ -611,7 +624,7 @@ def test_interpolated_jira_values_are_validated(tmp_path: Path, snippet: str, me
 
 def test_github_labels_reject_quotes(tmp_path: Path) -> None:
     text = MINIMAL.replace(
-        'source = "jira"\nquery = "project = VUL"',
+        'source = "jira"\nproject = "VUL"',
         'source = "github"\nrepo = "acme/api"\nlabels = [\'a"b\']',
     )
 
@@ -620,33 +633,56 @@ def test_github_labels_reject_quotes(tmp_path: Path) -> None:
 
 
 def test_a_malformed_repo_is_rejected(tmp_path: Path) -> None:
-    text = MINIMAL.replace('source = "jira"', 'source = "github"\nrepo = "not-a-repo"')
+    text = MINIMAL.replace(
+        'source = "jira"\nproject = "VUL"', 'source = "github"\nrepo = "not-a-repo"'
+    )
 
     with pytest.raises(config.ConfigError, match='must be "owner/name"'):
         config.load(write(tmp_path, text))
 
 
-def test_jira_inputs_are_refused_on_a_github_track(tmp_path: Path) -> None:
+def test_a_jira_scope_is_refused_on_a_github_track(tmp_path: Path) -> None:
     text = MINIMAL.replace(
-        'source = "jira"\nquery = "project = VUL"',
+        'source = "jira"\nproject = "VUL"',
         'source = "github"\nrepo = "acme/api"\nproject = "X"',
     )
 
-    with pytest.raises(config.ConfigError, match='only apply when source = "jira"'):
+    with pytest.raises(config.ConfigError, match="project only applies to jira"):
         config.load(write(tmp_path, text))
 
 
-def test_github_inputs_are_refused_on_a_jira_track(tmp_path: Path) -> None:
-    text = MINIMAL + 'labels = ["x"]\n'
+@pytest.mark.parametrize(
+    ("snippet", "feature"),
+    [
+        ('status = "Open"', "status"),
+        ('extra = "milestone:v2"', "extra"),
+        ('[smoke.filters]\nTeam = ["x"]', "filters"),
+    ],
+)
+def test_a_feature_the_source_lacks_is_refused_by_name(
+    tmp_path: Path, snippet: str, feature: str
+) -> None:
+    """The source declares what it compiles; the mismatch names the key."""
+    text = MINIMAL.replace(
+        '[vul]\nsource = "jira"\nproject = "VUL"',
+        f'[smoke]\nsource = "github"\nrepo = "acme/api"\n{snippet}',
+    )
 
-    with pytest.raises(config.ConfigError, match='only apply when source = "github"'):
+    with pytest.raises(config.ConfigError, match=f'source = "github" does not support {feature}'):
         config.load(write(tmp_path, text))
+
+
+def test_labels_are_a_feature_both_sources_compile(tmp_path: Path) -> None:
+    cfg = config.load(write(tmp_path, MINIMAL + 'labels = ["x"]\n'))
+
+    assert cfg.track("vul").query.labels_all == ("x",)
+    assert 'labels = "x"' in render(cfg.track("vul"))
 
 
 def test_blocked_transition_is_jira_only(tmp_path: Path) -> None:
     text = MINIMAL.replace(
-        'source = "jira"\nquery = "project = VUL"',
-        'source = "github"\nrepo = "acme/api"\nquery = "repo:acme/api"\nblocked_transition = "X"',
+        'source = "jira"\nproject = "VUL"',
+        'source = "github"\nrepo = "acme/api"\nblocked_transition = "X"',
     )
 
     with pytest.raises(config.ConfigError, match="blocked_transition only applies to jira"):
@@ -654,9 +690,7 @@ def test_blocked_transition_is_jira_only(tmp_path: Path) -> None:
 
 
 def test_structured_inputs_are_queue_only(tmp_path: Path) -> None:
-    text = MINIMAL.replace(
-        'source = "jira"\nquery = "project = VUL"', 'mode = "sweep"\nproject = "VUL"'
-    )
+    text = MINIMAL.replace('source = "jira"\nproject = "VUL"', 'mode = "sweep"\nproject = "VUL"')
 
     with pytest.raises(config.ConfigError, match="remove: project"):
         config.load(write(tmp_path, text))
@@ -681,7 +715,7 @@ def test_max_concurrency_must_be_a_positive_integer(tmp_path: Path) -> None:
 
 def test_max_concurrency_is_queue_only(tmp_path: Path) -> None:
     text = MINIMAL.replace(
-        'source = "jira"\nquery = "project = VUL"', 'mode = "sweep"\nmax_concurrency = 2'
+        'source = "jira"\nproject = "VUL"', 'mode = "sweep"\nmax_concurrency = 2'
     )
 
     with pytest.raises(config.ConfigError, match="remove: max_concurrency"):
@@ -801,7 +835,7 @@ command = ["pi", "-p", "@{prompt_file}", "--model", "{model}"]
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 model = "frontier"
 """
 

@@ -20,9 +20,12 @@ from typer.testing import CliRunner
 import tina
 from tina import cli, config, control, executors, harness, log, sources, verify
 from tina.models import OutcomeReport, OutcomeStatus, WorkItem
+from tina.query import Query
 from tina.sources.base import ClaimPrognosis
 
 # The one URL the stubbed verifier considers real.
+#: What CONFIG's `[vul]` table builds: the bare project, blocked label excluded.
+VUL_QUERY = Query(scope="VUL", labels_none=("tina-blocked",))
 GOOD_ARTIFACT = "https://example.test/pr/1"
 MISSING_ARTIFACT = "https://example.test/pr/999"
 
@@ -37,7 +40,7 @@ command = ["{python}", "{script}", "{{prompt_file}}", "{{outcome_dir}}"]
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 track = "remediate"
 result = "github:pr"
 """
@@ -72,13 +75,13 @@ class FakeSource:
         self.claims: list[str] = []
         self.annotations: list[tuple[str, str]] = []
         self.blocked: list[str] = []
-        self.rechecked: list[tuple[str, str]] = []
+        self.rechecked: list[tuple[str, Query]] = []
 
-    def query(self, q: str) -> list[WorkItem]:
+    def query(self, q: Query) -> list[WorkItem]:
         self.queried = q
         return list(self.items)
 
-    def matches(self, item_id: str, q: str) -> bool:
+    def matches(self, item_id: str, q: Query) -> bool:
         self.rechecked.append((item_id, q))
         return self.matching
 
@@ -92,7 +95,7 @@ class FakeSource:
     def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
         return ClaimPrognosis(would_claim=self.claimable, holder=self.holder)
 
-    def claimed(self, q: str) -> list[WorkItem]:
+    def claimed(self, q: Query) -> list[WorkItem]:
         self.claimed_query = q
         return list(self.held)
 
@@ -467,7 +470,7 @@ def test_dispatch_enqueues_up_to_the_limit(project: Path) -> None:
 
     cli.dispatch_track(config.load(project), "vul", 2, source=source, executor=executor)
 
-    assert source.queried == "project = VUL"
+    assert source.queried == VUL_QUERY
     assert executor.enqueued == [("vul", "VUL-1"), ("vul", "VUL-2")]
     assert source.claims == [], "the dispatcher never claims — workers do"
 
@@ -593,7 +596,7 @@ def test_a_dry_run_enqueues_nothing(project: Path, wired: tuple[FakeSource, Fake
     )
 
     assert result.exit_code == 0
-    assert source.queried == "project = VUL"
+    assert source.queried == VUL_QUERY
     assert executor.enqueued == []
     assert source.claims == [], "the dispatcher never claims — workers do"
 
@@ -906,7 +909,7 @@ def test_a_stale_item_exits_no_action_needed_before_any_claim(
     record = last_record(result.stdout)
 
     assert result.exit_code == 0
-    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.rechecked == [("VUL-1", VUL_QUERY)]
     assert source.claims == [], "the re-check comes before the claim write"
     assert record["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
     assert "no longer matches" in record["report"]["details"]
@@ -922,7 +925,7 @@ def test_the_re_check_runs_under_claim_none_too(
     result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(unclaiming)])
 
     assert result.exit_code == 0
-    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.rechecked == [("VUL-1", VUL_QUERY)]
     assert last_record(result.stdout)["effective_status"] == OutcomeStatus.NO_ACTION_NEEDED
 
 
@@ -934,7 +937,7 @@ def test_an_eligible_item_proceeds_to_the_claim(
     result = runner.invoke(cli.app, [*RUN_ARGV, "--config", str(project)])
 
     assert result.exit_code == 0
-    assert source.rechecked == [("VUL-1", "project = VUL")]
+    assert source.rechecked == [("VUL-1", VUL_QUERY)]
     assert source.claims == ["VUL-1"]
     assert last_record(result.stdout)["message"] == "run complete"
 
@@ -1372,7 +1375,7 @@ def test_run_help_lists_the_dry_run_flag() -> None:
 class NoQuerySource(FakeSource):
     """A tracker that fails the test if the query a paused dispatch must skip runs."""
 
-    def query(self, q: str) -> list[WorkItem]:
+    def query(self, q: Query) -> list[WorkItem]:
         raise AssertionError("a paused dispatch must never query")
 
 
@@ -1894,7 +1897,7 @@ def test_status_logs_one_line_with_dispatchs_field_names(
     assert lines[0]["message"] == "status"
     assert (lines[0]["track"], lines[0]["matched"], lines[0]["in_flight"]) == ("vul", 2, 1)
     assert "dry_run" not in lines[0], "status has no such mode"
-    assert (source.queried, source.claimed_query) == ("project = VUL", "project = VUL")
+    assert (source.queried, source.claimed_query) == (VUL_QUERY, VUL_QUERY)
     assert "Track vul" not in result.stdout, "the summary is prose; stdout stays JSON"
 
 

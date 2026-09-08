@@ -13,8 +13,9 @@ set -eu
 
 : "${GITHUB_API_URL:=http://127.0.0.1:8765}"
 
-# The repo and the query come from examples/bug-triage/tina.toml, read out of
-# the derived config by workdir.sh and exported by record.sh. There is no
+# The repo comes from examples/bug-triage/tina.toml, read out of the derived
+# config by workdir.sh; the query is what tina renders from that same config
+# (`tina tracks --format json`). Both are exported by record.sh. There is no
 # literal fallback here on purpose: a fallback is a second copy of the track
 # with extra steps, and beat 1 would be free to show rows dispatch is not about
 # to claim.

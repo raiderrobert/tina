@@ -97,8 +97,9 @@ copied from anything in `demo/`: `workdir.sh` derives it from
 line and appending `[harnesses.demo]`. It then reverses the substitution and
 diffs the result against the published example, and refuses to proceed if the
 recorded config is anything other than that file with exactly one line changed.
-`queue.sh` gets its repo and query from the same derivation rather than holding
-its own copy.
+`queue.sh` gets its repo from the same derivation and its query from
+`tina tracks --format json` on the derived config, rather than holding its own
+copy of either.
 
 `just check` runs `./demo/workdir.sh --check`, so that assertion is checked on
 every pull request and not only when someone re-records.

@@ -14,7 +14,7 @@ command = ["pi", "--prompt-file", "{prompt_file}", "--model", "{model}"]
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 model = "sonnet"
 max_concurrency = 3
 
@@ -89,6 +89,11 @@ def test_tracks_json_carries_what_infrastructure_derives_from(tmp_path: Path) ->
         "track": "vul",
         "model": "sonnet",
         "max_concurrency": 3,
+        "query": (
+            'project = VUL AND status = "Open" AND assignee IS EMPTY'
+            ' AND (labels IS EMPTY OR labels not in ("tina-blocked")) ORDER BY created ASC'
+        ),
     }
     assert payload["tracks"]["audit"]["enabled"] is False
+    assert payload["tracks"]["audit"]["query"] is None, "a sweep runs no query"
     assert payload["tracks"]["audit"]["source"] is None

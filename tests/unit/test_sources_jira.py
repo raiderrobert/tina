@@ -8,11 +8,15 @@ import httpx
 import pytest
 
 from tina.models import WorkItem
+from tina.query import Assignee, Query
 from tina.sources.base import SourceError
-from tina.sources.jira import SEARCH_PATH, JiraSource, render_adf
+from tina.sources.jira import SEARCH_PATH, JiraSource, compile, render_adf
 
 BASE = "https://acme.atlassian.net"
 BOT = "bot-account-id"
+
+#: A bare project query: the universal predicates and nothing optional.
+Q = Query(scope="VUL")
 
 
 def issue(
@@ -53,7 +57,7 @@ def test_query_returns_normalized_items() -> None:
         seen["body"] = request.content
         return httpx.Response(200, json={"issues": [issue(), issue("VUL-2")]})
 
-    items = source(handler).query("project = VUL")
+    items = source(handler).query(Q)
 
     assert seen["path"] == "/rest/api/3/search/jql"
     assert b"project = VUL" in seen["body"]
@@ -288,43 +292,22 @@ def test_claim_prognosis_under_a_label_claim(work_item: WorkItem) -> None:
     assert (unheld.would_claim, unheld.holder) == (True, "")
 
 
-def test_claimed_under_a_label_claim_inverts_the_negated_label_clause() -> None:
-    """The documented exclusion shapes, with the rest of the query preserved."""
+def test_claimed_under_a_label_claim_requires_the_claim_label() -> None:
+    """The claim label moves from excluded to required; the blocked label still excludes."""
     sent: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(json.loads(request.content)["jql"])
         return httpx.Response(200, json={"issues": [issue()]})
 
-    cases = [
-        # the shape the config example documents: labels IS EMPTY also matches
-        (
-            'project = VUL AND (labels IS EMPTY OR labels != "bot-claimed")',
-            'project = VUL AND labels = "bot-claimed"',
-        ),
-        # the compound in the other order
-        (
-            '(labels != "bot-claimed" OR labels IS EMPTY) AND project = VUL',
-            'labels = "bot-claimed" AND project = VUL',
-        ),
-        ('project = VUL AND labels != "bot-claimed"', 'project = VUL AND labels = "bot-claimed"'),
-        ("labels != bot-claimed", 'labels = "bot-claimed"'),
+    label_source(handler).claimed(
+        Q.model_copy(update={"labels_none": ("tina-blocked", "bot-claimed")})
+    )
+
+    assert sent == [
+        'project = VUL AND status = "Open" AND assignee IS EMPTY AND labels = "bot-claimed"'
+        ' AND (labels IS EMPTY OR labels not in ("tina-blocked")) ORDER BY created ASC'
     ]
-    for jql, _ in cases:
-        label_source(handler).claimed(jql)
-
-    assert sent == [expected for _, expected in cases]
-
-
-def test_a_query_with_no_negated_claim_label_is_a_source_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("the query is rejected before any request is made")
-
-    for jql in ("project = VUL", 'project = VUL AND labels != "other-label"'):
-        with pytest.raises(SourceError) as caught:
-            label_source(handler).claimed(jql)
-        assert jql in str(caught.value)
-        assert "bot-claimed" in caught.value.fix
 
 
 def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
@@ -333,7 +316,7 @@ def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("claim = 'none' has no claims to count")
 
-    assert source(handler, claim_policy="none").claimed("project = VUL") == []
+    assert source(handler, claim_policy="none").claimed(Q) == []
 
 
 # --- matches: the configured query, scoped to one item -----------------------
@@ -346,23 +329,12 @@ def test_matches_scopes_the_query_to_the_item() -> None:
         sent.append(json.loads(request.content)["jql"])
         return httpx.Response(200, json={"issues": [issue()]})
 
-    eligible = source(handler).matches("VUL-1", "project = VUL AND assignee IS EMPTY")
+    eligible = source(handler).matches("VUL-1", Q)
 
     assert eligible is True
-    assert sent == ['(project = VUL AND assignee IS EMPTY) AND key = "VUL-1"']
-
-
-def test_matches_strips_the_order_by_clause() -> None:
-    """`ORDER BY` cannot sit inside the parenthesized predicate."""
-    sent: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content)["jql"])
-        return httpx.Response(200, json={"issues": [issue()]})
-
-    source(handler).matches("VUL-1", "project = VUL ORDER BY created DESC")
-
-    assert sent == ['(project = VUL) AND key = "VUL-1"']
+    assert sent == ['project = VUL AND status = "Open" AND assignee IS EMPTY AND key = "VUL-1"'], (
+        "the whole predicate, plus the key; one key needs no ORDER BY"
+    )
 
 
 def test_a_gone_stale_item_no_longer_matches() -> None:
@@ -371,7 +343,7 @@ def test_a_gone_stale_item_no_longer_matches() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"issues": []})
 
-    assert source(handler).matches("VUL-1", "project = VUL") is False
+    assert source(handler).matches("VUL-1", Q) is False
 
 
 def test_matches_searches_and_never_writes() -> None:
@@ -381,7 +353,7 @@ def test_matches_searches_and_never_writes() -> None:
         calls.append((request.method, request.url.path))
         return httpx.Response(200, json={"issues": [issue()]})
 
-    source(handler).matches("VUL-1", "project = VUL")
+    source(handler).matches("VUL-1", Q)
 
     assert calls == [("POST", SEARCH_PATH)], "one search, and nothing else"
 
@@ -391,7 +363,7 @@ def test_http_error_is_a_source_error() -> None:
         return httpx.Response(403, text="forbidden")
 
     with pytest.raises(SourceError, match="403"):
-        source(handler).query("project = VUL")
+        source(handler).query(Q)
 
 
 def test_missing_env_is_named() -> None:
@@ -409,7 +381,7 @@ def test_server_errors_are_retried_on_a_short_ladder() -> None:
         return next(responses, httpx.Response(200, json={"issues": [issue()]}))
 
     waits: list[float] = []
-    items = source(handler, sleep=waits.append).query("project = VUL")
+    items = source(handler, sleep=waits.append).query(Q)
 
     assert [i.id for i in items] == ["VUL-1"]
     assert waits == [2.0, 8.0]
@@ -421,7 +393,7 @@ def test_a_persistent_server_error_raises_after_the_ladder() -> None:
 
     waits: list[float] = []
     with pytest.raises(SourceError, match="502: bad gateway"):
-        source(handler, sleep=waits.append).query("project = VUL")
+        source(handler, sleep=waits.append).query(Q)
 
     assert waits == [2.0, 8.0]
 
@@ -433,7 +405,7 @@ def test_a_rate_limit_waits_what_retry_after_asks() -> None:
         return next(responses, httpx.Response(200, json={"issues": [issue()]}))
 
     waits: list[float] = []
-    items = source(handler, sleep=waits.append).query("project = VUL")
+    items = source(handler, sleep=waits.append).query(Q)
 
     assert [i.id for i in items] == ["VUL-1"]
     assert waits == [7.0]
@@ -446,7 +418,7 @@ def test_retry_after_is_capped_so_the_server_cannot_demand_an_hour() -> None:
         return next(responses, httpx.Response(200, json={"issues": [issue()]}))
 
     waits: list[float] = []
-    source(handler, sleep=waits.append).query("project = VUL")
+    source(handler, sleep=waits.append).query(Q)
 
     assert waits == [60.0]
 
@@ -457,7 +429,7 @@ def test_a_4xx_other_than_the_rate_limit_is_never_retried() -> None:
 
     waits: list[float] = []
     with pytest.raises(SourceError, match="403"):
-        source(handler, sleep=waits.append).query("project = VUL")
+        source(handler, sleep=waits.append).query(Q)
 
     assert waits == []
 
@@ -489,7 +461,7 @@ def test_a_response_of_the_wrong_shape_is_a_source_error() -> None:
         return httpx.Response(200, json={"issues": "not a list"})
 
     with pytest.raises(SourceError, match="unexpected response"):
-        source(handler).query("project = VUL")
+        source(handler).query(Q)
 
 
 def test_non_json_is_a_source_error() -> None:
@@ -515,37 +487,27 @@ def test_unknown_fields_are_tolerated() -> None:
     assert item.raw["fields"]["someNewField"] == {"anything": True}, "raw keeps everything"
 
 
-def test_claimed_swaps_the_empty_assignee_clause() -> None:
-    """Every spelling of emptiness, with the rest of the query preserved."""
+def test_claimed_asks_for_the_current_user_with_the_rest_untouched() -> None:
+    """The assignee node flips; every other clause survives. No account lookup."""
     sent: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(json.loads(request.content)["jql"])
         return httpx.Response(200, json={"issues": [issue(), issue("VUL-2")]})
 
-    cases = [
-        # the architecture doc's example: the other clauses survive untouched
-        (
-            "project = VUL AND status = Open AND assignee IS EMPTY",
-            f'project = VUL AND status = Open AND assignee = "{BOT}"',
-        ),
-        # mid-query, and lowercase
-        (
-            "project = VUL AND assignee is empty AND status = Open",
-            f'project = VUL AND assignee = "{BOT}" AND status = Open',
-        ),
-        ("assignee IS EMPTY", f'assignee = "{BOT}"'),
-        ("assignee IS NULL", f'assignee = "{BOT}"'),
-        ("assignee = EMPTY", f'assignee = "{BOT}"'),
-        ("assignee=NULL", f'assignee = "{BOT}"'),
-        ("ASSIGNEE   IS    EMPTY", f'assignee = "{BOT}"'),
-    ]
-    items_returned = [source(handler).claimed(jql) for jql, _ in cases]
+    q = Q.model_copy(update={"fields": {"Team": ("Payments",)}, "extra": "labels not in (x)"})
+    unknown_bot = JiraSource(
+        client=httpx.Client(transport=httpx.MockTransport(handler)), base_url=BASE
+    )
+    items_returned = unknown_bot.claimed(q)
 
-    assert sent == [expected for _, expected in cases]
-    assert [item.id for item in items_returned[0]] == ["VUL-1", "VUL-2"]
-    assert items_returned[0][0].title == "CVE-2024-0001 in libfoo"
-    assert str(items_returned[0][0].url) == f"{BASE}/browse/VUL-1"
+    assert sent == [
+        'project = VUL AND status = "Open" AND "Team" in ("Payments")'
+        " AND assignee = currentUser() AND (labels not in (x)) ORDER BY created ASC"
+    ]
+    assert [item.id for item in items_returned] == ["VUL-1", "VUL-2"]
+    assert items_returned[0].title == "CVE-2024-0001 in libfoo"
+    assert str(items_returned[0].url) == f"{BASE}/browse/VUL-1"
 
 
 def test_claimed_issues_no_write() -> None:
@@ -558,26 +520,55 @@ def test_claimed_issues_no_write() -> None:
         assert request.url.path == SEARCH_PATH, "the only POST it makes is the search"
         return httpx.Response(200, json={"issues": [issue()]})
 
-    source(handler).claimed("project = VUL AND assignee IS EMPTY")
+    source(handler).claimed(Q)
 
     assert calls == [("POST", SEARCH_PATH)]
 
 
-def test_a_query_with_no_empty_assignee_clause_is_a_source_error() -> None:
-    """`IS NOT EMPTY` means the opposite, so it is not a match — loud beats a silent 0."""
+# --- compile: the predicate tree, as JQL --------------------------------------
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("the query is rejected before any request is made")
 
-    for jql in (
-        "project = VUL",
-        "project = VUL AND assignee IS NOT EMPTY",
-        "project = VUL AND assignee != EMPTY",
-    ):
-        with pytest.raises(SourceError) as caught:
-            source(handler).claimed(jql)
-        assert jql in str(caught.value)
-        assert "assignee IS EMPTY" in caught.value.fix
+def test_compile_emits_the_universal_predicates_in_order() -> None:
+    q = Query(
+        scope="VUL",
+        fields={"Team": ("Payments", "Search")},
+        labels_none=("tina-blocked",),
+        extra="labels not in (wontfix)",
+    )
+
+    assert compile(q) == (
+        'project = VUL AND status = "Open" AND "Team" in ("Payments", "Search")'
+        ' AND assignee IS EMPTY AND (labels IS EMPTY OR labels not in ("tina-blocked"))'
+        " AND (labels not in (wontfix)) ORDER BY created ASC"
+    )
+
+
+def test_compile_offers_back_bot_held_items_under_a_claim_transition() -> None:
+    jql = compile(Query(scope="VUL", status="Triage", assignee=Assignee.UNASSIGNED_OR_ME))
+
+    assert 'status = "Triage"' in jql
+    assert "(assignee IS EMPTY OR assignee = currentUser())" in jql
+    assert "labels" not in jql, "no excluded label means no label guard"
+
+
+def test_compile_excludes_every_marker_with_the_empty_guard() -> None:
+    jql = compile(Query(scope="BUGS", labels_none=("tina-blocked", "bot-claimed")))
+
+    assert '(labels IS EMPTY OR labels not in ("tina-blocked", "bot-claimed"))' in jql
+
+
+def test_compile_requires_each_label_separately() -> None:
+    """`labels = x AND labels = y` is all-of; `labels in (x, y)` would be any-of."""
+    jql = compile(Query(scope="BUGS", labels_all=("bug", "needs triage")))
+
+    assert 'labels = "bug" AND labels = "needs triage"' in jql
+
+
+def test_compile_scoped_to_an_item_drops_the_sort() -> None:
+    jql = compile(Query(scope="VUL", extra="x").scoped_to("VUL-7"))
+
+    assert jql.endswith('AND (x) AND key = "VUL-7"')
+    assert "ORDER BY" not in jql
 
 
 # --- lifecycle write-back: annotate and block (ADR-013) ----------------------

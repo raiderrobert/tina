@@ -37,6 +37,7 @@ from pathlib import Path
 from tina.config import Config, ConfigError, TrackConfig
 from tina.config import load as load_config
 from tina.prompt import RUNNER_TOKENS, SKILL_FILE, WORK_ITEM_TOKEN
+from tina.sources import render
 
 
 @dataclass(frozen=True)
@@ -149,7 +150,7 @@ def validate(
     if report.ok:
         for name in sorted(tracks):
             track = tracks[name]
-            what = "(sweep)" if track.mode == "sweep" else track.query
+            what = "(sweep)" if track.mode == "sweep" else render(track)
             flag = "" if track.enabled else " [disabled]"
             report.summary.append(f"{name}{flag}: {what}")
         report.summary.append(f"{tracks_root}: {len(tracks)} track(s) conform")

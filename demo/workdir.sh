@@ -133,17 +133,13 @@ if [ "$config_repo" != "$stub_repo" ] || [ "$config_repo" != "$agent_repo" ]; th
     die "repo mismatch: config '$config_repo', stub_server.py '$stub_repo', agent.py '$agent_repo' -- the recording would be all 404s"
 fi
 
-# 7. Hand the derived track to queue.sh, so the query is not copied a third
-#    time. record.sh sources this file, hence the quoting -- the query has
-#    spaces in it, and a value carrying a quote of its own would not survive.
-config_query=$(toml_value query "$DIR/tina.toml")
-case "$config_repo$config_query" in
-*\'*) die "the example's repo or query contains a single quote, which .demo-env cannot carry to queue.sh" ;;
+# 7. Hand the derived track's repo to queue.sh. The query is not in the file
+#    -- tina builds it from the parts -- so record.sh asks `tina tracks` for it
+#    once the working directory exists; this script stays python-free.
+case "$config_repo" in
+*\'*) die "the example's repo contains a single quote, which .demo-env cannot carry to queue.sh" ;;
 esac
-{
-    echo "DEMO_REPO='$config_repo'"
-    echo "DEMO_QUERY='$config_query'"
-} >"$DIR/.demo-env"
+echo "DEMO_REPO='$config_repo'" >"$DIR/.demo-env"
 
 if [ -n "$CHECK_DIR" ]; then
     echo "workdir.sh: ok -- the recording's config is examples/bug-triage/tina.toml with harness = \"demo\" and [harnesses.demo]"

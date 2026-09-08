@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from tina.errors import TinaError
 from tina.log import get_logger
 from tina.models import WorkItem
+from tina.query import Query
 
 log = get_logger(__name__)
 
@@ -41,9 +42,15 @@ class Source(Protocol):
 
     Tina never inspects the content of a work item — it only knows the item
     matched a query. All judgment about what the item is happens in the track.
+
+    Queries arrive as a `tina.query.Query`, the tracker-neutral predicate
+    tree; each adapter compiles it to its own syntax. The adapter module
+    exposes that as a free function, `compile(q) -> str`, so the native
+    string can be rendered without credentials, and declares the optional
+    nodes it handles in `tina.query.SOURCE_FEATURES`.
     """
 
-    def query(self, q: str) -> list[WorkItem]:
+    def query(self, q: Query) -> list[WorkItem]:
         """Run the configured query and return matching items."""
         ...
 
@@ -51,7 +58,7 @@ class Source(Protocol):
         """Fetch a single item by tracker identifier."""
         ...
 
-    def matches(self, item_id: str, q: str) -> bool:
+    def matches(self, item_id: str, q: Query) -> bool:
         """Whether the item still matches the configured query, right now.
 
         The worker's eligibility re-check: between dispatch and worker start
@@ -77,13 +84,13 @@ class Source(Protocol):
         """
         ...
 
-    def claimed(self, q: str) -> list[WorkItem]:
+    def claimed(self, q: Query) -> list[WorkItem]:
         """The items matching `q` that the bot currently holds.
 
         The complement of `query`, not a filter on top of it: a track query
         excludes claimed items by construction (ADR-004), so the adapter
-        *replaces* that exclusion with its own identity rather than appending
-        to it. Read-only, like `claim_prognosis` — one search, no writes.
+        *inverts* that exclusion (`Query.held_by`) rather than appending to
+        it. Read-only, like `claim_prognosis` — one search, no writes.
         """
         ...
 

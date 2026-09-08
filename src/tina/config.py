@@ -12,16 +12,17 @@ harness, and one table per track::
 
     [vul]
     source = "jira"
-    query = "project = VUL AND status = Open AND assignee IS EMPTY"
+    project = "VUL"
     track = "remediate"
     result = "github:pr"
 
 Every table that is not `harnesses` or `executors` is a track, keyed by its
 table name.
 
-A track may name its query outright, or give the parts and let Tina build it
-(`tina.query`): a Jira `project` plus `filters`, or a GitHub `repo` plus
-`labels`. Onboarding a team is then one array edit.
+A track gives the parts of its query and Tina builds it (`tina.query`): a
+Jira `project` plus `filters`, or a GitHub `repo` plus `labels`. Onboarding a
+team is then one array edit. There is no raw query key: every node Tina has
+to rewrite is structured, and `extra` carries whatever else a source accepts.
 
 Three environment variables override the top-level paths, so one image runs
 against configs mounted anywhere: `TINA_TRACKS_DIR`, `TINA_ARTIFACTS_DIR`, and
@@ -40,7 +41,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from tina import query as query_builders
+from tina import query as query_ir
 from tina.errors import TinaError
 
 SOURCES = ("jira", "github")
@@ -78,7 +79,6 @@ _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _QUEUE_ONLY_KEYS = frozenset(
     {
         "source",
-        "query",
         "repo",
         "claim",
         "claim_label",
@@ -95,12 +95,10 @@ _QUEUE_ONLY_KEYS = frozenset(
     }
 )
 
-#: Structured query inputs, by the source they build a query for. A key from
-#: the other source's set is a config bug, named at load.
-_JIRA_QUERY_KEYS = ("project", "status", "filters", "extra")
-_GITHUB_QUERY_KEYS = ("labels",)
+#: The removed raw-query key. Named so the pointer beats "extra inputs".
+_REMOVED_QUERY_KEYS = ("query", "jql")
 
-# Values the query builders interpolate. Validated here so the builders can
+# Values the query compilers interpolate. Validated here so the builders can
 # concatenate without escaping: a team name with a quote in it is at best a
 # broken query, at worst an injected one.
 _JIRA_PROJECT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -245,20 +243,19 @@ class TrackConfig(BaseModel):
     mode: Literal["queue", "sweep"] = "queue"
     # Required for queue tracks; a sweep has neither, enforced in _check_mode.
     source: Literal["jira", "github"] | None = None
-    # The full tracker query. Given outright, or built from the structured
-    # inputs below (`tina.query`) when absent — never both.
-    query: str = ""
     track: str
-    # Jira structured inputs: the project searched, the status an item must be
-    # in (the tracker's queued status, "Open" unless the workflow names it
-    # otherwise), one `"Field" in (...)` clause per filters entry, and an
-    # extra predicate appended as `AND (...)`.
+    # The parts of the query (`tina.query.build`). Which optional parts a
+    # source accepts is its declared feature set; a mismatch fails in
+    # _check_mode. `project` is Jira's scope; GitHub's is `repo`, below.
     project: str | None = None
+    # The status an item must be in: the tracker's queued status, "Open"
+    # unless the workflow names it otherwise.
     status: str | None = Field(default=None, min_length=1)
+    # One `"Field" in (...)` clause per entry.
     filters: dict[str, list[str]] = Field(default_factory=dict)
+    # Native predicate text the compiler appends verbatim and never reads.
     extra: str | None = Field(default=None, min_length=1)
-    # GitHub structured input: labels an issue must carry, all of them. The
-    # repo is `repo`, required for the source anyway.
+    # Labels an item must carry, all of them.
     labels: list[str] = Field(default_factory=list)
     # A track is on by virtue of being present; false ships it without running
     # it. Disabled tracks are still fully validated so they cannot rot.
@@ -297,6 +294,28 @@ class TrackConfig(BaseModel):
     # subprocess only — how a track skill's scripts get configured.
     env: dict[str, str] = Field(default_factory=dict)
 
+    @property
+    def query(self) -> query_ir.Query:
+        """The track's predicate tree, built from the parts above.
+
+        A property rather than a key: nothing in the file spells the query,
+        so `tina config-options` does not list it. `tina validate` renders
+        the native string through the source's `compile`.
+        """
+        return query_ir.build(self)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_raw_query(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for key in _REMOVED_QUERY_KEYS:
+                if key in data:
+                    raise ValueError(
+                        f"{key} is not a key; give the parts instead"
+                        " (project/status/filters/extra, or repo/labels)"
+                    )
+        return data
+
     @model_validator(mode="after")
     def _check_mode(self) -> TrackConfig:
         if self.mode == "sweep":
@@ -306,18 +325,16 @@ class TrackConfig(BaseModel):
             return self
         if self.source is None:
             raise ValueError('mode = "queue" requires source')
-        if self.source == "jira":
-            stray = sorted(set(_GITHUB_QUERY_KEYS) & self.model_fields_set)
-            if stray:
-                raise ValueError(f'{", ".join(stray)} only apply when source = "github"')
-            if not self.query and self.project is None:
-                raise ValueError('source = "jira" requires query or project')
-        else:
-            stray = sorted(set(_JIRA_QUERY_KEYS) & self.model_fields_set)
-            if stray:
-                raise ValueError(f'{", ".join(stray)} only apply when source = "jira"')
+        if self.source == "jira" and self.project is None:
+            raise ValueError('source = "jira" requires project')
+        if self.source != "jira":
+            if self.project is not None:
+                raise ValueError("project only applies to jira tracks; the scope is repo")
             if self.blocked_transition is not None:
                 raise ValueError("blocked_transition only applies to jira tracks")
+        unsupported = sorted(self.query.features() - query_ir.SOURCE_FEATURES[self.source])
+        if unsupported:
+            raise ValueError(f'source = "{self.source}" does not support {", ".join(unsupported)}')
         return self
 
     @field_validator("project")
@@ -545,19 +562,12 @@ def parse(
                 f"{path}: unexpected top-level key {name!r}; expected one of "
                 f"{', '.join(sorted(_SCALAR_KEYS))} or a track table"
             )
-        track = _build(
+        tracks[name] = _build(
             TrackConfig,
             {"name": name, "track": name, **table},
             path,
             f"[{name}]",
         )
-        structured = sorted(set(_JIRA_QUERY_KEYS + _GITHUB_QUERY_KEYS) & set(table))
-        if table.get("query") and structured:
-            raise ConfigError(
-                f"{path}: [{name}]: query is a full override; remove it or the structured"
-                f" inputs ({', '.join(structured)})"
-            )
-        tracks[name] = _with_query(track)
 
     config = _build(
         Config,
@@ -583,32 +593,6 @@ def parse(
     _validate_names(config)
     _validate_model(config)
     return config
-
-
-def _with_query(track: TrackConfig) -> TrackConfig:
-    """Fill in the query a track gave the parts of. A sweep or a full override
-    passes through untouched."""
-    if track.mode == "sweep" or track.query:
-        return track
-    if track.source == "jira":
-        built = query_builders.jira_query(
-            str(track.project),
-            track.status,
-            track.filters,
-            track.extra,
-            claim_policy=track.claim,
-            claim_label=track.claim_label,
-            claim_transition=track.claim_transition,
-            blocked_label=None if track.blocked_transition else track.blocked_label,
-        )
-    else:
-        built = query_builders.github_query(
-            str(track.repo),
-            track.labels,
-            claim_label=track.claim_label if track.claim == "label" else None,
-            blocked_label=track.blocked_label,
-        )
-    return track.model_copy(update={"query": built})
 
 
 def _tables(value: Any, path: Path, key: str) -> list[tuple[str, dict[str, Any]]]:

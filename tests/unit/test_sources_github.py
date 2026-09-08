@@ -9,11 +9,15 @@ import httpx
 import pytest
 
 from tina.models import WorkItem
+from tina.query import Assignee, Query
 from tina.sources.base import SourceError
-from tina.sources.github import NO_ASSIGNEE, GitHubSource
+from tina.sources.github import GitHubSource, Issue, compile, satisfies
 
 REPO = "acme/api"
 BOT = "acme-tina[bot]"
+
+#: A bare repo query: the universal predicates and nothing optional.
+Q = Query(scope=REPO)
 
 
 @pytest.fixture
@@ -55,10 +59,10 @@ def test_query_returns_normalized_items() -> None:
         seen["q"] = request.url.params["q"]
         return httpx.Response(200, json={"items": [issue(), issue(43)]})
 
-    items = source(handler).query("repo:acme/api is:open")
+    items = source(handler).query(Q)
 
     assert seen["path"] == "/search/issues"
-    assert seen["q"] == "repo:acme/api is:open"
+    assert seen["q"] == "repo:acme/api is:issue is:open no:assignee"
     assert [i.id for i in items] == ["acme/api#42", "acme/api#43"]
     assert str(items[0].url) == f"https://github.com/{REPO}/issues/42"
     assert items[0].description == "stack trace follows"
@@ -171,7 +175,7 @@ def test_a_secondary_rate_limit_is_retried_once_after_the_documented_wait() -> N
         return next(responses, httpx.Response(200, json={"items": [issue()]}))
 
     waits: list[float] = []
-    items = source(handler, sleep=waits.append).query("repo:acme/api no:assignee")
+    items = source(handler, sleep=waits.append).query(Q)
 
     assert [i.id for i in items] == ["acme/api#42"]
     assert waits == [60.0]
@@ -185,7 +189,7 @@ def test_a_second_secondary_rate_limit_raises_with_the_original_message() -> Non
 
     waits: list[float] = []
     with pytest.raises(SourceError, match="403.*secondary rate limit"):
-        source(handler, sleep=waits.append).query("repo:acme/api no:assignee")
+        source(handler, sleep=waits.append).query(Q)
 
     assert waits == [60.0]
 
@@ -255,33 +259,21 @@ def test_a_missing_html_url_becomes_none_not_empty_string() -> None:
     assert source(handler).get("42").url is None
 
 
-def test_claimed_swaps_the_no_assignee_qualifier_in_place() -> None:
-    """Other qualifiers unmoved — including a label that merely contains the text."""
+def test_claimed_asks_for_the_token_holder_with_the_rest_untouched() -> None:
+    """The assignee node flips; every other qualifier survives. No login lookup."""
     sent: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path != "/user", "@me needs no login lookup"
         sent.append(request.url.params["q"])
         return httpx.Response(200, json={"items": [issue(), issue(43)]})
 
-    cases = [
-        # the README's example query
-        (
-            "repo:acme/api is:issue is:open no:assignee label:bug",
-            f"repo:acme/api is:issue is:open assignee:{BOT} label:bug",
-        ),
-        # a label whose value is the qualifier's own text is a different token
-        (
-            'repo:acme/api no:assignee label:"no:assignee"',
-            f'repo:acme/api assignee:{BOT} label:"no:assignee"',
-        ),
-        ("no:assignee", f"assignee:{BOT}"),
-        ("repo:acme/api NO:ASSIGNEE is:open", f"repo:acme/api assignee:{BOT} is:open"),
-    ]
-    items_returned = [source(handler).claimed(q) for q, _ in cases]
+    q = Q.model_copy(update={"labels_all": ("bug",), "labels_none": ("tina-blocked",)})
+    items_returned = source(handler, bot_login=None).claimed(q)
 
-    assert sent == [expected for _, expected in cases]
-    assert [i.id for i in items_returned[0]] == ["acme/api#42", "acme/api#43"]
-    assert str(items_returned[0][0].url) == f"https://github.com/{REPO}/issues/42"
+    assert sent == ['repo:acme/api is:issue is:open assignee:@me label:"bug" -label:"tina-blocked"']
+    assert [i.id for i in items_returned] == ["acme/api#42", "acme/api#43"]
+    assert str(items_returned[0].url) == f"https://github.com/{REPO}/issues/42"
 
 
 def test_claimed_issues_gets_only() -> None:
@@ -293,26 +285,9 @@ def test_claimed_issues_gets_only() -> None:
         assert request.method == "GET", "claimed() must never write"
         return httpx.Response(200, json={"items": [issue()]})
 
-    source(handler).claimed("repo:acme/api is:open no:assignee")
+    source(handler).claimed(Q)
 
     assert calls == [("GET", "/search/issues")]
-
-
-def test_a_query_with_no_no_assignee_qualifier_is_a_source_error() -> None:
-    """A literal containing the text is not the qualifier, and neither is a negated one."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("the query is rejected before any request is made")
-
-    for q in (
-        "repo:acme/api is:open label:bug",
-        'repo:acme/api is:open label:"no:assignee"',
-        "repo:acme/api is:open -no:assignee",
-    ):
-        with pytest.raises(SourceError) as caught:
-            source(handler).claimed(q)
-        assert q in str(caught.value)
-        assert NO_ASSIGNEE in caught.value.fix
 
 
 # --- claim policies: label claims for App tokens that cannot assign (ADR-014) -
@@ -381,39 +356,23 @@ def test_claim_prognosis_under_a_label_claim(item: WorkItem) -> None:
     assert (unheld.would_claim, unheld.holder) == (True, "")
 
 
-def test_claimed_under_a_label_claim_inverts_the_negated_label_token() -> None:
-    """`-label:x` becomes `label:x`; every other qualifier stays put."""
+def test_claimed_under_a_label_claim_requires_the_claim_label() -> None:
+    """`-label:x` becomes `label:x`; the blocked label still excludes; still unassigned."""
     sent: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(request.url.params["q"])
         return httpx.Response(200, json={"items": [issue()]})
 
-    cases = [
-        (
-            "repo:acme/api is:issue is:open -label:bot-claimed label:bug",
-            "repo:acme/api is:issue is:open label:bot-claimed label:bug",
-        ),
-        ('repo:acme/api -label:"bot-claimed"', "repo:acme/api label:bot-claimed"),
-        ("-LABEL:BOT-CLAIMED", "label:bot-claimed"),
+    q = Q.model_copy(
+        update={"labels_all": ("bug",), "labels_none": ("tina-blocked", "bot-claimed")}
+    )
+    label_source(handler).claimed(q)
+
+    assert sent == [
+        'repo:acme/api is:issue is:open no:assignee label:"bug" label:"bot-claimed"'
+        ' -label:"tina-blocked"'
     ]
-    for q, _ in cases:
-        label_source(handler).claimed(q)
-
-    assert sent == [expected for _, expected in cases]
-
-
-def test_a_query_with_no_negated_claim_label_is_a_source_error() -> None:
-    """A different label's negation is not the claim label's."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("the query is rejected before any request is made")
-
-    for q in ("repo:acme/api is:open", "repo:acme/api -label:other-label"):
-        with pytest.raises(SourceError) as caught:
-            label_source(handler).claimed(q)
-        assert q in str(caught.value)
-        assert "-label:bot-claimed" in caught.value.fix
 
 
 def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
@@ -422,12 +381,12 @@ def test_claimed_under_claim_none_is_empty_without_a_search() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("claim = 'none' has no claims to count")
 
-    assert source(handler, claim_policy="none").claimed("repo:acme/api is:open") == []
+    assert source(handler, claim_policy="none").claimed(Q) == []
 
 
-# --- matches: the query's structured qualifiers, re-checked in code ----------
+# --- matches: the query, evaluated in code against the fetched issue ---------
 
-MATCHES_QUERY = "repo:acme/api is:issue is:open no:assignee label:bug -label:tina-blocked"
+MATCHES_QUERY = Query(scope=REPO, labels_all=("bug",), labels_none=("tina-blocked",))
 
 
 def matching_source(payload: dict[str, Any]) -> GitHubSource:
@@ -468,18 +427,50 @@ def test_an_issue_carrying_a_negated_label_no_longer_matches() -> None:
     assert matching_source(payload).matches("42", MATCHES_QUERY) is False
 
 
-def test_matches_reads_quoted_label_tokens() -> None:
-    payload = issue(labels=["bug"])
-
-    assert matching_source(payload).matches("42", 'is:open label:"bug"') is True
-    assert matching_source(payload).matches("42", 'is:open -label:"bug"') is False
+def test_matches_fetches_and_never_searches() -> None:
+    """Search has no number qualifier, so the predicate is evaluated locally."""
+    assert matching_source(issue(labels=["bug"])).matches("42", MATCHES_QUERY) is True
 
 
-def test_unstructured_qualifiers_are_the_dispatch_querys_job() -> None:
-    """repo: and is:issue were true at dispatch and cannot silently change."""
-    payload = issue(labels=["bug"])
+def test_satisfies_compares_labels_case_insensitively() -> None:
+    fetched = Issue.model_validate(issue(labels=["Bug"]))
 
-    assert matching_source(payload).matches("42", "repo:acme/api is:issue label:bug") is True
+    assert satisfies(fetched, Query(scope=REPO, labels_all=("bug",))) is True
+    assert satisfies(fetched, Query(scope=REPO, labels_none=("BUG",))) is False
+
+
+def test_satisfies_requires_every_label() -> None:
+    fetched = Issue.model_validate(issue(labels=["triaged"]))
+
+    assert satisfies(fetched, Query(scope=REPO, labels_all=("triaged", "fix"))) is False
+
+
+# --- compile: the predicate tree, as issue search --------------------------------
+
+
+def test_compile_quotes_labels_and_excludes_markers() -> None:
+    q = Query(scope=REPO, labels_all=("needs triage", "bug"), labels_none=("tina-blocked", "x"))
+
+    assert compile(q) == (
+        'repo:acme/api is:issue is:open no:assignee label:"needs triage" label:"bug"'
+        ' -label:"tina-blocked" -label:"x"'
+    )
+
+
+def test_compile_with_nothing_optional() -> None:
+    assert compile(Q) == "repo:acme/api is:issue is:open no:assignee"
+
+
+def test_compile_refuses_what_search_cannot_express() -> None:
+    """Config rejects these first; the compiler refuses rather than silently dropping a node."""
+    with pytest.raises(SourceError, match="cannot compile filters"):
+        compile(Query(scope=REPO, fields={"Team": ("a",)}))
+    with pytest.raises(SourceError, match="cannot compile extra, status"):
+        compile(Query(scope=REPO, status="Open", extra="x"))
+    with pytest.raises(SourceError, match="no item qualifier"):
+        compile(Q.scoped_to("42"))
+    with pytest.raises(SourceError, match="cannot express assignee"):
+        compile(Query(scope=REPO, assignee=Assignee.UNASSIGNED_OR_ME))
 
 
 # --- lifecycle write-back: annotate and block (ADR-013) ----------------------
@@ -597,32 +588,6 @@ def test_login_reports_who_the_token_acts_as() -> None:
         return httpx.Response(200, json={"login": "acme-bot"})
 
     assert source(handler, bot_login=None).login() == "acme-bot"
-
-
-# --- label lists in the re-check ------------------------------------------------
-
-
-def test_a_comma_list_label_qualifier_is_any_of() -> None:
-    """`label:fix,chore` is GitHub search's OR; the re-check must read it that way."""
-    q = "is:open no:assignee label:triaged label:fix,refactor,chore -label:blocked"
-    assert matching_source(issue(labels=["triaged", "fix"])).matches("42", q) is True
-    assert matching_source(issue(labels=["triaged", "chore"])).matches("42", q) is True
-    assert matching_source(issue(labels=["triaged", "docs"])).matches("42", q) is False
-    assert matching_source(issue(labels=["fix"])).matches("42", q) is False, (
-        "the other label: still ANDs"
-    )
-
-
-def test_a_negated_comma_list_excludes_any_of_them() -> None:
-    q = "is:open -label:blocked,wontfix"
-    assert matching_source(issue(labels=["bug"])).matches("42", q) is True
-    assert matching_source(issue(labels=["wontfix"])).matches("42", q) is False
-    assert matching_source(issue(labels=["blocked"])).matches("42", q) is False
-
-
-def test_quoted_labels_in_a_list_are_unquoted() -> None:
-    q = 'is:open label:"needs triage","good first issue"'
-    assert matching_source(issue(labels=["good first issue"])).matches("42", q) is True
 
 
 # --- short-lived tokens ---------------------------------------------------------

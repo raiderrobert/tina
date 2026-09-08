@@ -95,7 +95,8 @@ A track is `Source -> Skill -> Result`.
 Reading across the examples:
 
 - **Source** is always a ticket tracker, selected by a query. The tracker varies
-  (Jira, Linear, Asana), so the source is an adapter plus a query string.
+  (Jira, Linear, Asana), so the source is an adapter plus a query the adapter
+  compiles to its own syntax.
 - **Skill** is the agent work. It is the variable part.
 - **Result** is an artifact in some other system. In most examples the result
   system is not the source system.
@@ -108,11 +109,12 @@ One track can produce different results per run: the vulnerability track
 ends in a PR link or a discovery comment depending on what it finds. Results are
 not 1:1 with tracks.
 
-### Structured query inputs
+### The query is a tree, not a string
 
 Most tracks are one query shape where a list changes: a project plus the set
-of opted-in teams, a repo plus a label set. A track may give the parts instead
-of the query, and Tina builds it (`tina.query`):
+of opted-in teams, a repo plus a label set. A track gives the parts, and Tina
+builds a `tina.query.Query` — a small predicate tree — that the source
+compiles to its own syntax:
 
 ```toml
 [vul]
@@ -134,8 +136,16 @@ first. Under `claim = "assign"` with a `claim_transition`, bot-held items still
 in the queued status are offered back — the transition, not the assignee, is
 what excludes an item, so one still queued was reopened upstream. Every value
 interpolated is validated at load (charset, shape): a team name with a quote
-in it is at best a broken query. `query` remains the full override for
-anything that does not fit; a track may not set both.
+in it is at best a broken query.
+
+There is no raw query key. The two things Tina does to a query — invert the
+exclusion for `status`, scope it to one item for the worker's re-check — are
+operations on the tree (`held_by`, `scoped_to`), so no adapter tokenizes or
+regexes a string it did not write. `extra` is the escape hatch: native text
+the compiler appends verbatim and never reads, kept out of every node Tina
+rewrites. Each source declares which optional nodes it compiles
+(`tina.query.SOURCE_FEATURES`); a track using one its source lacks fails at
+load, naming the key ([ADR-019](adr/019-query-ir.md)).
 
 ### Sweep tracks
 
@@ -151,7 +161,7 @@ omits the work-item block from the prompt. The outcome contract, verification,
 and the run record are unchanged; the record carries a stable `sweep` marker
 where the item id would be. Discovering the work, deduplicating it against
 what was already filed, and delivering it is the skill's job. Queue keys
-(`source`, `query`, claim and failure policy) are invalid on a sweep entry
+(`source`, the query parts, claim and failure policy) are invalid on a sweep entry
 and rejected at config load.
 
 ---
@@ -314,8 +324,8 @@ query. All judgment about what the item actually is happens inside the track.
 
 | Operation | Used by | Purpose |
 |---|---|---|
-| `query()` | dispatcher | run the configured query, return work items |
-| `claimed(q)` | `status` | the same query with its unclaimed clause inverted: what workers hold now |
+| `query(q)` | dispatcher | compile and run the track's `Query`, return work items |
+| `claimed(q)` | `status` | `query(q.held_by(...))`: the exclusion inverted, what workers hold now |
 | `matches(item_id, q)` | worker | re-check the whole query against one item at worker start |
 | `claim(item)` | worker | mark the item as taken; fail if already claimed |
 | `annotate(item, comment)`, `block(item)` | worker | lifecycle write-back after a bad run (§15) |
@@ -344,9 +354,11 @@ full track query scoped to the one item, before claiming, and exits
 `no_action_needed` when it no longer matches. Re-checking the whole
 predicate rather than existence is the point: it works for every exclusion
 mechanism, and under `claim = "none"` it is the only guard. Jira evaluates
-it as one search (`(query) AND key = <item>`, ORDER BY stripped); GitHub
-search has no number qualifier, so the adapter fetches the issue and
-re-checks the structured qualifiers in code.
+it as one search (`q.scoped_to(item)` compiles to `... AND key = <item>`);
+GitHub search has no number qualifier, so the adapter fetches the issue and
+evaluates the tree against it in code (`satisfies`). Because the query is a
+tree there is no unstructured remainder to wave through: every node is
+checked.
 
 Transient tracker failures are retried inside the adapters' request layer
 rather than surfaced, because the failure is intermittent and looks like an
@@ -382,9 +394,9 @@ is what `unassigned = TRUE` is already doing in the work implementation.
 The claim strategy is per track ([ADR-014](adr/014-claim-policy-per-track.md)):
 `claim = "assign"` (default) assigns the bot, idempotently — an item the bot
 already holds re-claims rather than deadlocking. `claim = "label"` applies
-`claim_label` instead, for deployments whose tokens cannot assign; the query
-must exclude the label, and `claimed()`/`status` invert that negated label
-token rather than the assignee clause. `claim = "none"` skips claiming
+`claim_label` instead, for deployments whose tokens cannot assign; the built
+query excludes the label, and `claimed()`/`status` invert that exclusion
+rather than the assignee node. `claim = "none"` skips claiming
 entirely — dedupe is the query's job. On Jira, `claim_transition` names a
 status transition applied after a successful claim.
 
@@ -596,15 +608,15 @@ job = "tina-{track}"        # {track} optional: one job per track, sized per tra
 
 [vul]
 source = "jira"
-query = "project = VUL AND status = Open AND assignee IS EMPTY"
+project = "VUL"             # the scope; open, unassigned, not blocked are built in
 track = "remediate"         # skill under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only
 max_concurrency = 4         # this track's cap on live workers; opts out of the fleet knob
 
 [bug]
 source = "github"
-repo = "acme/api"           # required for the github source
-query = "repo:acme/api is:issue is:open no:assignee label:bug"
+repo = "acme/api"           # the scope; required for the github source
+labels = ["bug"]
 track = "triage"
 result = "github:issue-comment"
 ```
@@ -628,9 +640,11 @@ track = 'tracks/vul'
 jql = "project = VUL AND status in open and unassgined = TRUE"
 ```
 
-`jql` binds the schema to one tracker. `source` + `query` generalizes it. The
-`track` key survives by name, but the modern one drops the directory prefix:
-`tracks_dir` owns the path, so the value is the bare skill name.
+`jql` binds the schema to one tracker. `source` plus the query parts
+generalizes it: the same `[track]` shape reads from either tracker, and the
+parts a tracker cannot compile are refused at load rather than passed through.
+The `track` key survives by name, but the modern one drops the directory
+prefix: `tracks_dir` owns the path, so the value is the bare skill name.
 
 ### Runtime policy
 
@@ -660,8 +674,9 @@ activity in the logs. Per track, `on_failure` decides:
   workflow state they already watch.
 
 It triggers on *effective* status: `failed`, `needs_human`, and `resolved`
-that failed verification. Clean outcomes write nothing. The track query has to
-exclude the marker itself; Tina never rewrites queries. Writing about the run
+that failed verification. Clean outcomes write nothing. The built query
+excludes the marker; a track cannot opt out of that short of a
+`blocked_transition`. Writing about the run
 is lifecycle, the same category as claiming, not a result — the line is drawn
 in [ADR-013](adr/013-lifecycle-write-back-is-not-result-writing.md).
 

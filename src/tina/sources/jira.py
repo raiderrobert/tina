@@ -7,7 +7,6 @@ being empty, then confirmed by re-reading the issue.
 from __future__ import annotations
 
 import os
-import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +16,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from tina.log import get_logger
 from tina.models import WorkItem
+from tina.query import SOURCE_FEATURES, Assignee, Query
 from tina.sources.base import (
     ClaimPrognosis,
     RetryRule,
@@ -41,16 +41,20 @@ RETRY_RULES = (
     RetryRule(status=frozenset({429}), waits=(60.0,), retry_after=True),
 )
 
-#: The four spellings of "nobody holds this" that JQL accepts. `IS NOT EMPTY`
-#: deliberately does not match: `NOT` is neither `EMPTY` nor `NULL`, so the
-#: alternation fails and the query falls through to the error in `claimed_jql`
-#: — it means the opposite, and silently inverting it would report the wrong
-#: number.
-EMPTY_ASSIGNEE = re.compile(r"\bassignee\s*(?:=|\bIS\b)\s*(?:EMPTY|NULL)\b", re.IGNORECASE)
+#: The query nodes this source compiles (`tina.query.SOURCE_FEATURES`).
+FEATURES = SOURCE_FEATURES["jira"]
 
-#: A trailing ORDER BY, stripped before the query is scoped to one item —
-#: it cannot sit inside the parenthesized predicate.
-ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE | re.DOTALL)
+#: The status a track reads from when it sets none. A workflow label the
+#: tracker owns, not Tina, so it is a config knob rather than a constant.
+DEFAULT_STATUS = "Open"
+
+#: `currentUser()` is whoever the credentials belong to — the bot — so the
+#: held-by query needs no account lookup.
+_ASSIGNEE = {
+    Assignee.UNASSIGNED: "assignee IS EMPTY",
+    Assignee.UNASSIGNED_OR_ME: "(assignee IS EMPTY OR assignee = currentUser())",
+    Assignee.ME: "assignee = currentUser()",
+}
 
 
 class SearchRequest(BaseModel):
@@ -174,8 +178,8 @@ class JiraSource:
         """`GET /myself`: the credentials work, and this is who they act as."""
         return self.bot_account_id
 
-    def query(self, q: str) -> list[WorkItem]:
-        request = SearchRequest(jql=q)
+    def query(self, q: Query) -> list[WorkItem]:
+        request = SearchRequest(jql=compile(q))
         response = self._request("POST", SEARCH_PATH, json=request.model_dump(by_alias=True))
         result = parse_payload(SearchResult, response, "jira", SEARCH_PATH)
         return [self._to_item(issue) for issue in result.issues]
@@ -183,14 +187,13 @@ class JiraSource:
     def get(self, item_id: str) -> WorkItem:
         return self._to_item(self._issue(item_id))
 
-    def matches(self, item_id: str, q: str) -> bool:
+    def matches(self, item_id: str, q: Query) -> bool:
         """One search: the configured query scoped to the one item.
 
         The tracker evaluates the whole predicate, so whatever mechanism
         excluded the item — assignment, status, a label — is caught here.
         """
-        jql = f'({ORDER_BY.sub("", q)}) AND key = "{item_id}"'
-        return bool(self.query(jql))
+        return bool(self.query(q.scoped_to(item_id)))
 
     def claim(self, item: WorkItem) -> bool:
         """Take the item under the track's claim policy (ADR-014).
@@ -276,11 +279,11 @@ class JiraSource:
         # is reserved for nobody holding it.
         return ClaimPrognosis(would_claim=False, holder=assignee.account_id or "unknown")
 
-    def claimed(self, q: str) -> list[WorkItem]:
+    def claimed(self, q: Query) -> list[WorkItem]:
         """The bot's own issues: the track query with its exclusion inverted.
 
-        Which clause gets inverted follows the claim policy — the emptiness
-        clause under assign, the negated claim label under label. Routed
+        Which node gets inverted follows the claim policy — the assignee
+        under assign, the claim label under label (`Query.held_by`). Routed
         through `query`, so this is the same single `POST /rest/api/3/search/jql`
         a dispatch makes. Under `claim = "none"` the bot never holds anything,
         so the answer is an empty list, without a search that would imply
@@ -288,9 +291,7 @@ class JiraSource:
         """
         if self.claim_policy == "none":
             return []
-        if self.claim_policy == "label":
-            return self.query(claimed_label_jql(q, str(self.claim_label)))
-        return self.query(claimed_jql(q, self.bot_account_id))
+        return self.query(q.held_by(self.claim_policy, self.claim_label))
 
     def annotate(self, item: WorkItem, comment: str) -> None:
         """Comment on the issue. Best-effort per the contract: log, never raise."""
@@ -364,52 +365,35 @@ class JiraSource:
         )
 
 
-def claimed_jql(q: str, account_id: str) -> str:
-    """Swap the empty-assignee clause for the bot, leaving the rest of `q` alone.
+def compile(q: Query) -> str:
+    """JQL for a query: one `AND` clause per node, oldest first.
 
-    A predicate is substituted for a predicate, so the surrounding `AND`s are
-    preserved by construction and no clause can be left dangling — that is what
-    keeps the two counts two halves of one question: project, status, and every
-    other filter still apply to the in-flight count.
-
-    Known limitation, accepted: a quoted literal containing the phrase —
-    `summary ~ "assignee is empty"` — is rewritten too. JQL has no cheap way to
-    skip string literals without a tokenizer, and a track whose text search
-    contains that exact phrase is not a case worth a parser.
+    `fields` becomes one `"Field" in ("a", "b")` clause per field — the field
+    name is quoted, so custom fields with spaces work. Excluded labels carry
+    the `labels IS EMPTY OR` guard, because JQL's `not in` does not match
+    issues that have no labels at all. A scoped query drops the sort: one
+    key needs no order.
     """
-    rewritten, swapped = EMPTY_ASSIGNEE.subn(f'assignee = "{account_id}"', q)
-    if not swapped:
-        raise SourceError(
-            f"jira: the track query has no empty-assignee clause to invert: {q!r}",
-            fix="Add `AND assignee IS EMPTY` to the track query so dispatch skips claimed issues.",
-        )
-    return rewritten
+    unsupported = q.features() - FEATURES
+    if unsupported:
+        raise SourceError(f"jira: cannot compile {', '.join(sorted(unsupported))}")
+    clauses = [f"project = {q.scope}", f'status = "{q.status or DEFAULT_STATUS}"']
+    for field, values in q.fields.items():
+        clauses.append(f'"{field}" in ({_quoted(values)})')
+    clauses.append(_ASSIGNEE[q.assignee])
+    clauses += [f'labels = "{label}"' for label in q.labels_all]
+    if q.labels_none:
+        clauses.append(f"(labels IS EMPTY OR labels not in ({_quoted(q.labels_none)}))")
+    if q.extra:
+        clauses.append(f"({q.extra})")
+    if q.item:
+        clauses.append(f'key = "{q.item}"')
+        return " AND ".join(clauses)
+    return " AND ".join(clauses) + " ORDER BY created ASC"
 
 
-def claimed_label_jql(q: str, label: str) -> str:
-    """Swap the negated claim-label clause for its positive, the rest untouched.
-
-    Two shapes are recognized, case-insensitively and with or without quotes:
-    the bare `labels != "x"`, and the compound
-    `(labels IS EMPTY OR labels != "x")` in either order — the compound is the
-    correct exclusion, since JQL's `!=` does not match issues with no labels
-    at all. Both invert to `labels = "x"`.
-    """
-    quoted = f'"?{re.escape(label)}"?'
-    not_labeled = rf"labels\s*!=\s*{quoted}"
-    empty = r"labels\s+IS\s+EMPTY"
-    clause = re.compile(
-        rf"\(\s*(?:{empty}\s+OR\s+{not_labeled}|{not_labeled}\s+OR\s+{empty})\s*\)|{not_labeled}",
-        re.IGNORECASE,
-    )
-    rewritten, swapped = clause.subn(f'labels = "{label}"', q)
-    if not swapped:
-        raise SourceError(
-            f"jira: the track query has no negated claim label to invert: {q!r}",
-            fix=f'Add `AND (labels IS EMPTY OR labels != "{label}")` to the track query'
-            " so dispatch skips claimed issues.",
-        )
-    return rewritten
+def _quoted(values: tuple[str, ...]) -> str:
+    return ", ".join(f'"{value}"' for value in values)
 
 
 def adf_document(text: str) -> dict[str, Any]:

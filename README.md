@@ -49,7 +49,7 @@ command = ["pi", "-p", "@{prompt_file}"]
 [bug]
 source = "github"
 repo = "acme/api"
-labels = ["bug"]            # or the full query = "repo:acme/api is:issue ..."
+labels = ["bug"]            # open, unassigned, not blocked are built in
 track = "triage"
 result = "github:issue-comment"
 ```
@@ -64,8 +64,8 @@ tina run --track bug --item 4821
 tina status --track bug
 ```
 
-`status` derives both counts from the track's own `query` — once as `dispatch` runs
-it, and once with its `no:assignee` clause swapped for the bot — so they are two
+`status` derives both counts from the track's own query — once as `dispatch` runs
+it, and once with its unassigned predicate flipped to the bot — so they are two
 halves of one question and Tina keeps no state to go stale.
 
 An external scheduler calls `dispatch`. Tina does not own scheduling — Cloud
