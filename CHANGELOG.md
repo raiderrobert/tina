@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.4](https://github.com/raiderrobert/tina/compare/v0.1.3...v0.1.4) (2026-09-08)
+
+
+### Features
+
+* **admission:** path overrides on validate and doctor, for embedders ([8bfd21d](https://github.com/raiderrobert/tina/commit/8bfd21dda5e9fef0b7de68650979b20e788c1eee))
+* **config:** a `models` list — what {model} may be, checked statically and live ([4f28495](https://github.com/raiderrobert/tina/commit/4f28495a481392b3987df8ff57cce268c8007dcc))
+* **config:** path overrides for embedders; unbranded write-back; $WORK_ITEM_KEY ([e419160](https://github.com/raiderrobert/tina/commit/e41916040cee0a9e15d96dcae5ad5c791acca5c5))
+
+
+### Documentation
+
+* **introspect:** key descriptions name no command ([0a1ac7c](https://github.com/raiderrobert/tina/commit/0a1ac7c1164afd18bdce9bd536aaab10e056b16c))
+* neutral names in the structured-query examples and tests ([2f1c636](https://github.com/raiderrobert/tina/commit/2f1c6364eb82211cec724776afa18f0515da6f20))
+
 ## [0.1.3](https://github.com/raiderrobert/tina/compare/v0.1.2...v0.1.3) (2026-09-07)
 
 
