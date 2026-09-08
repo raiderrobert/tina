@@ -12,7 +12,7 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 
 [remediate]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 
 [audit]
 mode = "sweep"
@@ -60,7 +60,9 @@ def test_a_conforming_project_passes_with_a_summary(tmp_path: Path) -> None:
 
     assert report.ok, report.errors
     assert report.summary[0] == "audit: (sweep)"
-    assert report.summary[1] == "remediate: project = VUL"
+    assert report.summary[1].startswith("remediate: project = VUL AND status"), (
+        "the summary shows the native query the source would run"
+    )
     assert report.summary[-1].endswith("2 track(s) conform")
     assert report.warnings == []
 
@@ -195,9 +197,7 @@ def test_only_with_an_unknown_track_is_an_error(tmp_path: Path) -> None:
 
 def test_a_disabled_track_is_still_checked(tmp_path: Path) -> None:
     path = project(tmp_path, paths={})
-    path.write_text(
-        CONFIG.replace('query = "project = VUL"', 'query = "project = VUL"\nenabled = false')
-    )
+    path.write_text(CONFIG.replace('project = "VUL"', 'project = "VUL"\nenabled = false'))
 
     report = validate.validate(path)
 

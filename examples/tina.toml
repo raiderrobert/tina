@@ -54,9 +54,16 @@ job = "tina-worker"
 
 [vul]
 source = "jira"
-query = "project = VUL AND status = Open AND assignee IS EMPTY"
+project = "VUL"
 track = "remediate"         # skill name under tracks_dir; defaults to the key
 result = "github:pr"        # declaration only — the agent produces it
+# The query is built from the parts: the queued status, unassigned, not
+# blocked, not claimed, oldest first are tina's job. Onboarding a team is one
+# array edit. There is no raw query key; `extra` carries any other predicate.
+# status = "Open"             # the default
+# extra = "labels not in (wontfix)"
+# [vul.filters]
+# Team = ["Payments", "Search"]
 # max_concurrency = 4         # this track's cap on live workers. Opts out of the
 #                             # control file's max_concurrency; paused still applies.
 # model = "claude-sonnet-x"   # substituted for {model} in the harness command;
@@ -64,43 +71,26 @@ result = "github:pr"        # declaration only — the agent produces it
 # claim = "assign"            # how the worker claims (ADR-014): "assign" the
 #                             # bot (default), "label" applies claim_label, or
 #                             # "none" — no claim, dedupe is the query's job
-# claim_label = "bot-claimed" # required with claim = "label"; the query must
-#                             # exclude it. Jira:
-#                             #   AND (labels IS EMPTY OR labels != "bot-claimed")
-#                             # GitHub: -label:bot-claimed
+# claim_label = "bot-claimed" # required with claim = "label"; the built
+#                             # query excludes it
 # claim_transition = "In Progress"  # jira only: transition applied after a
 #                             # successful claim, so the queued status stays true
 # enabled = true              # false ships the track without running it
 # on_failure = "leave"        # "annotate": after a failed, needs_human, or
 #                             # unverified run, comment the outcome on the
 #                             # item and apply blocked_label
-# blocked_label = "tina-blocked"  # the label block() applies after a bad run.
-# The query must exclude it, or blocked items match again. Jira:
-#   AND (labels IS EMPTY OR labels != "tina-blocked")
-# GitHub: -label:tina-blocked
+# blocked_label = "tina-blocked"  # the label block() applies after a bad run;
+#                             # the built query excludes it
 # blocked_transition = "Blocked"  # jira only: block() transitions to this
 #                             # status instead; the query's status clause
 #                             # already excludes it.
 
-# Instead of `query`, a track may give the parts and let tina build it —
-# the queued status, unassigned, not blocked, not claimed, oldest first are
-# then tina's job, and onboarding a team is one array edit:
-# [vul-by-team]
-# source = "jira"
-# project = "VUL"
-# status = "Open"                       # the default
-# extra = "labels not in (wontfix)"
-# [vul-by-team.filters]
-# Team = ["Payments", "Search"]
-
 [bug]
 source = "github"
 repo = "acme/api"
-query = "repo:acme/api is:issue is:open no:assignee label:bug"
+labels = ["bug"]
 track = "triage"
 result = "github:issue-comment"
-# The structured form of the same track:
-# labels = ["bug"]            # instead of query; repo is required either way
 
 # Optional: literal strings merged over the inherited environment for the
 # harness subprocess only — how a track skill's scripts get configured.
@@ -111,7 +101,7 @@ result = "github:issue-comment"
 
 # A sweep track has no queue: dispatch enqueues exactly one worker with no
 # item, and the skill discovers, dedupes, and delivers the work itself.
-# Queue keys (source, query, claim and failure policy) are invalid here;
+# Queue keys (source, project, claim and failure policy) are invalid here;
 # enabled, model, and env still apply.
 [stuck-claims]
 mode = "sweep"

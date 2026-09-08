@@ -9,7 +9,6 @@ tolerated failure mode (architecture §9).
 from __future__ import annotations
 
 import os
-import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -20,6 +19,7 @@ from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 from tina import credentials
 from tina.log import get_logger
 from tina.models import WorkItem
+from tina.query import SOURCE_FEATURES, Assignee, Query
 from tina.sources.base import (
     ClaimPrognosis,
     RetryRule,
@@ -35,8 +35,13 @@ API_BASE = "https://api.github.com"
 SEARCH_PATH = "/search/issues"
 ACCEPT = "application/vnd.github+json"
 
-#: The qualifier a track query uses to exclude claimed issues.
-NO_ASSIGNEE = "no:assignee"
+#: The query nodes this source compiles (`tina.query.SOURCE_FEATURES`).
+FEATURES = SOURCE_FEATURES["github"]
+
+#: `@me` is whoever the token belongs to — the bot — so the held-by query
+#: needs no login lookup. Search has no OR over assignees, and a claim
+#: transition is a Jira-only key, so `UNASSIGNED_OR_ME` never arrives here.
+_ASSIGNEE = {Assignee.UNASSIGNED: "no:assignee", Assignee.ME: "assignee:@me"}
 
 #: GitHub reports its secondary rate limit as a 403 whose body carries this
 #: documented phrase. Back-to-back searches trip it easily.
@@ -163,8 +168,8 @@ class GitHubSource:
         """`GET /user`: the token works, and this is who it acts as."""
         return self.bot_login
 
-    def query(self, q: str) -> list[WorkItem]:
-        params = SearchParams(q=q)
+    def query(self, q: Query) -> list[WorkItem]:
+        params = SearchParams(q=compile(q))
         response = self._request("GET", SEARCH_PATH, params=params.model_dump())
         result = parse_payload(SearchResult, response, "github", SEARCH_PATH)
         return [self._to_item(issue) for issue in result.items]
@@ -172,16 +177,14 @@ class GitHubSource:
     def get(self, item_id: str) -> WorkItem:
         return self._to_item(self._issue(_number(item_id)))
 
-    def matches(self, item_id: str, q: str) -> bool:
-        """Fetch the issue and re-check the query's structured qualifiers.
+    def matches(self, item_id: str, q: Query) -> bool:
+        """Fetch the issue and evaluate the query against it in code.
 
-        Search has no number qualifier, so the predicate is evaluated in code:
-        state, assignee emptiness, `label:` present, `-label:` absent — the
-        same token grammar `claimed_search` scans. Qualifiers outside that set
-        (`repo:`, `is:issue`) were true at dispatch and cannot silently change,
-        so they pass.
+        Search has no number qualifier, so the predicate is checked locally
+        (`satisfies`). The query is a tree, so every node is checked — there
+        is no unstructured remainder to wave through.
         """
-        return _matches_qualifiers(self._issue(_number(item_id)), q)
+        return satisfies(self._issue(_number(item_id)), q)
 
     def claim(self, item: WorkItem) -> bool:
         """Take the item under the track's claim policy (ADR-014).
@@ -235,20 +238,19 @@ class GitHubSource:
             return ClaimPrognosis(would_claim=True, holder=self.bot_login)
         return ClaimPrognosis(would_claim=False, holder=", ".join(logins))
 
-    def claimed(self, q: str) -> list[WorkItem]:
+    def claimed(self, q: Query) -> list[WorkItem]:
         """The bot's own issues: the track query with its exclusion inverted.
 
-        Which token gets inverted follows the claim policy — `no:assignee`
-        under assign, the negated claim label under label. Routed through
-        `query`, so this is the same single `GET /search/issues` a dispatch
-        makes. Under `claim = "none"` the bot never holds anything, so the
-        answer is an empty list, without a search that would imply otherwise.
+        Which node gets inverted follows the claim policy — the assignee
+        under assign, the claim label under label (`Query.held_by`). Routed
+        through `query`, so this is the same single `GET /search/issues` a
+        dispatch makes. Under `claim = "none"` the bot never holds anything,
+        so the answer is an empty list, without a search that would imply
+        otherwise.
         """
         if self.claim_policy == "none":
             return []
-        if self.claim_policy == "label":
-            return self.query(claimed_label_search(q, str(self.claim_label)))
-        return self.query(claimed_search(q, self.bot_login))
+        return self.query(q.held_by(self.claim_policy, self.claim_label))
 
     def annotate(self, item: WorkItem, comment: str) -> None:
         """Comment on the issue. Best-effort per the contract: log, never raise."""
@@ -325,85 +327,43 @@ class GitHubSource:
         )
 
 
-def claimed_search(q: str, login: str) -> str:
-    """Swap the `no:assignee` qualifier for the bot, other qualifiers unmoved.
+def compile(q: Query) -> str:
+    """Issue search for a query: one qualifier per node.
 
-    A whitespace-token scan rather than a regex: `\\bno:assignee\\b` also matches
-    inside `label:"no:assignee"`, because the quote supplies the word boundary,
-    and would rewrite a label into a qualifier. Exact token equality is the only
-    rule that tells the qualifier apart from a literal containing its text.
+    Every required label is its own `label:` qualifier (GitHub ANDs them);
+    excluded labels are negated. Values are quoted so labels with spaces
+    survive tokenization. Search has no item qualifier, so a scoped query
+    cannot be compiled — `matches` evaluates it locally instead.
     """
-    tokens = q.split()
-    if not any(token.lower() == NO_ASSIGNEE for token in tokens):
-        raise SourceError(
-            f"github: the track query has no {NO_ASSIGNEE} qualifier to invert: {q!r}",
-            fix=f"Add `{NO_ASSIGNEE}` to the track query so dispatch skips claimed issues.",
-        )
-    return " ".join(
-        f"assignee:{login}" if token.lower() == NO_ASSIGNEE else token for token in tokens
-    )
+    unsupported = q.features() - FEATURES
+    if unsupported:
+        raise SourceError(f"github: cannot compile {', '.join(sorted(unsupported))}")
+    if q.item is not None:
+        raise SourceError("github: search has no item qualifier; evaluate with `satisfies`")
+    if q.assignee not in _ASSIGNEE:
+        raise SourceError(f"github: search cannot express assignee = {q.assignee}")
+    parts = [f"repo:{q.scope}", "is:issue", "is:open", _ASSIGNEE[q.assignee]]
+    parts += [f'label:"{label}"' for label in q.labels_all]
+    parts += [f'-label:"{label}"' for label in q.labels_none]
+    return " ".join(parts)
 
 
-def claimed_label_search(q: str, label: str) -> str:
-    """Swap the negated claim-label token for its positive, other tokens unmoved.
+def satisfies(issue: Issue, q: Query) -> bool:
+    """Whether a fetched issue matches the query, node by node.
 
-    The same exact-token scan as `claimed_search`, for the same reason: only
-    token equality tells the qualifier apart from a literal containing its
-    text. The label value may be bare or quoted.
+    The local counterpart of `compile`, for the one question search cannot
+    answer: does this issue, by number, still match? `scope` holds by
+    construction — the issue was fetched from the repo. Label comparison is
+    case-insensitive, as GitHub's is.
     """
-    negated = {f"-label:{label.lower()}", f'-label:"{label.lower()}"'}
-    tokens = q.split()
-    if not any(token.lower() in negated for token in tokens):
-        raise SourceError(
-            f"github: the track query has no -label:{label} qualifier to invert: {q!r}",
-            fix=f"Add `-label:{label}` to the track query so dispatch skips claimed issues.",
-        )
-    return " ".join(f"label:{label}" if token.lower() in negated else token for token in tokens)
-
-
-#: One search token: runs of non-space characters, where a double-quoted span
-#: may contain spaces — `label:"needs triage",bug` is one token.
-_QUERY_TOKEN = re.compile(r'(?:[^\s"]+|"[^"]*")+')
-
-#: The state qualifiers the re-check understands, in both spellings.
-_STATE_QUALIFIERS = {
-    "is:open": "open",
-    "state:open": "open",
-    "is:closed": "closed",
-    "state:closed": "closed",
-}
-
-
-def _matches_qualifiers(issue: Issue, q: str) -> bool:
-    """Evaluate the query's structured qualifiers against a fetched issue.
-
-    A `label:` value is a comma list meaning any-of — `label:fix,chore` is
-    GitHub search's OR — and its negation excludes an issue carrying any of
-    them. Two `label:` tokens AND together, as in search.
-    """
+    if issue.state != "open":
+        return False
+    if q.assignee is Assignee.UNASSIGNED and issue.assignees:
+        return False
     labels = {name.lower() for name in issue.label_names}
-    for token in _QUERY_TOKEN.findall(q):
-        lowered = token.lower()
-        if lowered in _STATE_QUALIFIERS:
-            if issue.state != _STATE_QUALIFIERS[lowered]:
-                return False
-        elif lowered == NO_ASSIGNEE:
-            if issue.assignees:
-                return False
-        elif lowered.startswith("label:"):
-            if not _label_values(lowered) & labels:
-                return False
-        elif lowered.startswith("-label:") and _label_values(lowered.removeprefix("-")) & labels:
-            return False
-    return True
-
-
-def _label_values(token: str) -> set[str]:
-    """The labels a `label:` token names — one, or a comma list — unquoted and
-    lowercased. A label whose own name contains a comma has to be quoted in
-    the query; the split does not look inside quotes, an accepted limitation
-    for a name that rare."""
-    return {part.strip('"').lower() for part in token.split(":", 1)[1].split(",") if part}
+    if any(label.lower() not in labels for label in q.labels_all):
+        return False
+    return not any(label.lower() in labels for label in q.labels_none)
 
 
 def _number(item_id: str) -> str:

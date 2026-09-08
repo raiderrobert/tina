@@ -113,16 +113,19 @@ def open_pull_request(base_url: str, body: dict[str, Any]) -> dict[str, Any]:
 def matches(q: str, number: int) -> bool:
     """The two assignee filters the demo's queries use; other qualifiers always match.
 
-    `tina dispatch` sends `no:assignee` and `tina status` sends
-    `assignee:<login>` for the same track, so a stub that ignored `q` would
-    answer both with the same list and make the two counts meaningless.
+    `tina dispatch` sends `no:assignee` and `tina status` sends `assignee:@me`
+    for the same track, so a stub that ignored `q` would answer both with the
+    same list and make the two counts meaningless. `@me` is the token holder,
+    which here is the bot.
     """
     holders = assigned.get(number, [])
     for token in q.split():
         if token == "no:assignee" and holders:
             return False
-        if token.startswith("assignee:") and token.removeprefix("assignee:") not in holders:
-            return False
+        if token.startswith("assignee:"):
+            login = token.removeprefix("assignee:")
+            if (BOT_LOGIN if login == "@me" else login) not in holders:
+                return False
     return True
 
 

@@ -56,7 +56,7 @@ src/tina/
 ├── cli.py           # dispatch, run, status, tracks, config-options, validate, doctor
 ├── __main__.py      # `python -m tina`, how the local executor spawns workers
 ├── config.py        # TOML configuration
-├── query.py         # Structured query inputs -> JQL / GitHub search
+├── query.py         # The query IR: predicate tree, held_by/scoped_to, feature sets
 ├── control.py       # Runtime policy: paused and max_concurrency, fail-closed
 ├── governor.py      # The Governor protocol: a per-cycle throughput policy seam
 ├── models.py        # Work items in, outcome reports out
@@ -91,12 +91,18 @@ justfile               # Every check, in one place
 
 ## Adding a source adapter
 
-1. Implement the `Source` protocol in `src/tina/sources/base.py` — `query`,
+1. Write `compile(q: tina.query.Query) -> str` for the tracker's syntax, and
+   declare which optional nodes it handles in `tina.query.SOURCE_FEATURES`.
+   If the tracker's search cannot scope to one item, add a local
+   `satisfies(issue, q)` for `matches` (see `github.py`).
+2. Implement the `Source` protocol in `src/tina/sources/base.py` — `query`,
    `get`, `matches`, `claim`, `claim_prognosis`, `claimed`, `annotate`,
-   `block`, `login`. Use `require_env` and `parse_payload` from the same
-   module for credentials and response validation.
-2. Register it in the `build()` dispatch in `src/tina/sources/__init__.py`.
-3. Add `tests/unit/test_sources_<name>.py`, modeled on `test_sources_jira.py` and
+   `block`, `login`. `claimed` is `query(q.held_by(...))`; `matches` is
+   `query(q.scoped_to(...))` or `satisfies`. Use `require_env` and
+   `parse_payload` from the same module for credentials and response
+   validation.
+3. Register it in `build()` and `_COMPILERS` in `src/tina/sources/__init__.py`.
+4. Add `tests/unit/test_sources_<name>.py`, modeled on `test_sources_jira.py` and
    `test_sources_github.py`.
 
 `JiraSource` and `GitHubSource` are the templates. Copy their shape.

@@ -23,7 +23,7 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 [bug]
 source = "github"
 repo = "acme/api"
-query = "repo:acme/api is:issue is:open no:assignee label:bug"
+labels = ["bug"]
 track = "triage"
 result = "github:pr"
 ```
@@ -36,7 +36,7 @@ result = "github:pr"
 | `[bug]` | The track's name. `--track bug` selects it. Every top-level table that is not `harnesses` or `executors` is a track. |
 | `source = "github"` | The GitHub Issues adapter. `jira` is the other one. |
 | `repo = "acme/api"` | Which repo the query and the claim apply to. Required when `source = "github"`. |
-| `query` | Run verbatim against the tracker. **`no:assignee` is load-bearing**: claiming assigns the bot, which drops the item out of this query, which is how Tina keeps no state of its own ([ADR-004](../../docs/adr/004-worker-side-claiming.md)). |
+| `labels = ["bug"]` | The one variable part of the query. Tina builds the rest — open, `no:assignee`, not `tina-blocked` — and **`no:assignee` is load-bearing**: claiming assigns the bot, which drops the item out of the query, which is how Tina keeps no state of its own ([ADR-004](../../docs/adr/004-worker-side-claiming.md), [ADR-019](../../docs/adr/019-query-ir.md)). |
 | `track = "triage"` | The skill directory under `tracks_dir`. It defaults to the table name; spelled out here because it is the interesting key. |
 | `result = "github:pr"` | A declaration, not a runtime component. Tina never writes the result — the agent does, with its own tools. It says which credentials the image needs and what verification should expect ([architecture §4](../../docs/architecture.md#4-tracks)). |
 
@@ -46,7 +46,7 @@ The skill is [`tracks/triage/SKILL.md`](tracks/triage/SKILL.md). One work item
 goes through it like this:
 
 1. **Dispatch queries and enqueues.** `tina dispatch --track bug --limit 5` runs
-   `query` against the tracker, takes up to five items, and enqueues one worker
+   the track query against the tracker, takes up to five items, and enqueues one worker
    per item. The dispatcher never claims and never runs an agent.
 2. **The worker claims.** It assigns the bot to the issue. That is what stops two
    workers taking the same item, and it is why `no:assignee` is in the query.
@@ -78,8 +78,8 @@ Two edits to [`tina.toml`](tina.toml). As shipped it names `acme/api`, which doe
 not exist:
 
 - `repo` — your `owner/name`.
-- `query` — the same swap, plus whatever labels you actually use. Keep
-  `is:open no:assignee`.
+- `labels` — whatever labels you actually use. Open and unassigned are
+  built in.
 
 Then the safe first command:
 

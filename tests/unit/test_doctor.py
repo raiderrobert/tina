@@ -7,6 +7,7 @@ import pytest
 
 from tina import doctor
 from tina.models import WorkItem
+from tina.query import Query
 from tina.sources.base import ClaimPrognosis, SourceError
 
 CONFIG = """
@@ -17,7 +18,7 @@ command = ["{binary}", "{{prompt_file}}"]
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 
 [audit]
 mode = "sweep"
@@ -35,7 +36,7 @@ retry = [{{ markers = ["RESOURCE_EXHAUSTED"], waits = [1], reason = "capacity" }
 
 [vul]
 source = "jira"
-query = "project = VUL"
+project = "VUL"
 model = "fast"
 """
 
@@ -64,14 +65,14 @@ class FakeSource:
             raise SourceError("jira: GET /rest/api/3/myself returned 401", fix="Check the token.")
         return self.identity
 
-    def query(self, q: str) -> list[WorkItem]:
+    def query(self, q: Query) -> list[WorkItem]:
         return [WorkItem(id=f"VUL-{i}", source="jira") for i in range(self.matched)]
 
     # The rest of the Source protocol, never reached by doctor's read-only probes.
     def get(self, item_id: str) -> WorkItem:
         raise AssertionError("doctor never fetches an item")
 
-    def matches(self, item_id: str, q: str) -> bool:
+    def matches(self, item_id: str, q: Query) -> bool:
         raise AssertionError("doctor never re-checks an item")
 
     def claim(self, item: WorkItem) -> bool:
@@ -80,7 +81,7 @@ class FakeSource:
     def claim_prognosis(self, item: WorkItem) -> ClaimPrognosis:
         raise AssertionError("doctor never asks a prognosis")
 
-    def claimed(self, q: str) -> list[WorkItem]:
+    def claimed(self, q: Query) -> list[WorkItem]:
         raise AssertionError("doctor never counts claims")
 
     def annotate(self, item: WorkItem, comment: str) -> None:

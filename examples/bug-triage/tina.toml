@@ -17,6 +17,6 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 [bug]
 source = "github"
 repo = "acme/api"
-query = "repo:acme/api is:issue is:open no:assignee label:bug"
+labels = ["bug"]
 track = "triage"
 result = "github:pr"

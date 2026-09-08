@@ -1,6 +1,6 @@
 # 18. Structured query inputs build the query; `query` remains the override
 
-**Status:** Proposed
+**Status:** Partially superseded by [019](019-query-ir.md) — the `query` override is removed; the structured inputs stand
 
 **Date:** 2026-09-03
 

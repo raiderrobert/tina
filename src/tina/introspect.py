@@ -17,6 +17,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 from pydantic.fields import FieldInfo
 
 from tina.config import Config, TrackConfig
+from tina.sources import render
 
 #: Keys `tina config-options` documents, with the meaning of each. The field
 #: definitions carry the type and default; the prose lives here so the model
@@ -31,23 +32,21 @@ DESCRIPTIONS: dict[str, str] = {
         "one worker with no item, and the skill discovers, dedupes, and delivers the work."
     ),
     "source": 'Which tracker the queue reads: `"jira"` or `"github"`. Required for queue tracks.',
-    "query": (
-        "The full tracker query (JQL, or GitHub issue-search syntax). Given outright, or built "
-        "from the structured inputs (`project`/`status`/`filters`/`extra`, or `repo`/`labels`) "
-        "when absent — never both."
-    ),
     "track": "The skill directory under `tracks_dir`. Defaults to the table name.",
-    "project": "Jira structured input: the project key searched.",
+    "project": "Jira: the project key searched. Required for the source.",
     "status": (
-        'Jira structured input: the status an item must be in to be eligible. `"Open"` unless '
-        "the workflow names its queued status otherwise."
+        'Jira: the status an item must be in to be eligible. `"Open"` unless the workflow '
+        "names its queued status otherwise."
     ),
     "filters": (
-        "Jira structured input: a table of field name to allowed values, each becoming a "
+        "Jira: a table of field name to allowed values, each becoming a "
         '`"Field" in (...)` clause. Teams opt in by adding one value.'
     ),
-    "extra": "Jira structured input: a predicate appended as `AND (...)`.",
-    "labels": "GitHub structured input: labels an issue must carry (all of them).",
+    "extra": (
+        "Jira: native predicate text appended as `AND (...)`. Never inspected; the queued, "
+        "unassigned, and marker predicates are built and cannot go here."
+    ),
+    "labels": "Labels an item must carry, all of them. Either source.",
     "enabled": (
         "`false` ships the track without running it: dispatch and run refuse, the track "
         "listing reports it disabled, and it is still validated."
@@ -158,8 +157,9 @@ def tracks_text(config: Config) -> str:
 
 def tracks_json(config: Config) -> str:
     """One object per track, keyed by name, with the fields infrastructure
-    derives from: `enabled`, `mode`, `source`, `track`, `max_concurrency`.
-    Sorted, so regeneration is idempotent."""
+    derives from: `enabled`, `mode`, `source`, `track`, `max_concurrency`, and
+    `query` — the native string the source runs, since nothing in the config
+    file spells it. Sorted, so regeneration is idempotent."""
     payload = {
         name: {
             "enabled": track.enabled,
@@ -168,6 +168,7 @@ def tracks_json(config: Config) -> str:
             "track": track.track,
             "model": track.model,
             "max_concurrency": track.max_concurrency,
+            "query": None if track.mode == "sweep" else render(track),
         }
         for name, track in sorted(config.tracks.items())
     }
