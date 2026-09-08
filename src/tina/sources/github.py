@@ -9,6 +9,7 @@ tolerated failure mode (architecture §9).
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -345,6 +346,10 @@ def claimed_label_search(q: str, label: str) -> str:
     return " ".join(f"label:{label}" if token.lower() in negated else token for token in tokens)
 
 
+#: One search token: runs of non-space characters, where a double-quoted span
+#: may contain spaces — `label:"needs triage",bug` is one token.
+_QUERY_TOKEN = re.compile(r'(?:[^\s"]+|"[^"]*")+')
+
 #: The state qualifiers the re-check understands, in both spellings.
 _STATE_QUALIFIERS = {
     "is:open": "open",
@@ -355,9 +360,14 @@ _STATE_QUALIFIERS = {
 
 
 def _matches_qualifiers(issue: Issue, q: str) -> bool:
-    """Evaluate the query's structured qualifiers against a fetched issue."""
+    """Evaluate the query's structured qualifiers against a fetched issue.
+
+    A `label:` value is a comma list meaning any-of — `label:fix,chore` is
+    GitHub search's OR — and its negation excludes an issue carrying any of
+    them. Two `label:` tokens AND together, as in search.
+    """
     labels = {name.lower() for name in issue.label_names}
-    for token in q.split():
+    for token in _QUERY_TOKEN.findall(q):
         lowered = token.lower()
         if lowered in _STATE_QUALIFIERS:
             if issue.state != _STATE_QUALIFIERS[lowered]:
@@ -366,16 +376,19 @@ def _matches_qualifiers(issue: Issue, q: str) -> bool:
             if issue.assignees:
                 return False
         elif lowered.startswith("label:"):
-            if _label_value(lowered) not in labels:
+            if not _label_values(lowered) & labels:
                 return False
-        elif lowered.startswith("-label:") and _label_value(lowered.removeprefix("-")) in labels:
+        elif lowered.startswith("-label:") and _label_values(lowered.removeprefix("-")) & labels:
             return False
     return True
 
 
-def _label_value(token: str) -> str:
-    """The label a `label:` token names, unquoted and lowercased."""
-    return token.split(":", 1)[1].strip('"').lower()
+def _label_values(token: str) -> set[str]:
+    """The labels a `label:` token names — one, or a comma list — unquoted and
+    lowercased. A label whose own name contains a comma has to be quoted in
+    the query; the split does not look inside quotes, an accepted limitation
+    for a name that rare."""
+    return {part.strip('"').lower() for part in token.split(":", 1)[1].split(",") if part}
 
 
 def _number(item_id: str) -> str:
