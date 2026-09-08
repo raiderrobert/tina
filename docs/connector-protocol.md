@@ -32,8 +32,11 @@ proves a pull request exists — lives behind this protocol, in the connector.
   `status`, `doctor`, `validate`). Tina spawns it on first use, sends
   `shutdown` when done, closes `stdin`, waits a grace period (5 s), then
   kills it.
-- Every request has a timeout, 60 s unless `[sources.<name>] timeout` says
-  otherwise. A connector that does not answer in time is a source error.
+- Every request has a timeout, 120 s unless `[sources.<name>] timeout` says
+  otherwise. A connector that does not answer in time is a source error. A
+  connector's own retry waits — a tracker's documented rate-limit backoff —
+  count against it, so a connector keeps its ladder inside the timeout and
+  logs each wait to `stderr`, where Tina relays it.
 
 ## 2. Handshake
 
@@ -52,7 +55,7 @@ generic lifecycle settings the connector needs to interpret them.
 ← {"jsonrpc": "2.0", "id": 1, "result": {
      "protocol_version": 1,
      "connector": {"name": "jira", "version": "1.4.0"},
-     "capabilities": {"build_query": true, "artifact_endpoint": true}
+     "capabilities": {"build_query": true, "verify_artifact": true}
    }}
 ```
 
@@ -69,6 +72,10 @@ generic lifecycle settings the connector needs to interpret them.
   `blocked_label`. A connector implements claiming and blocking with them.
 - `capabilities` says which optional methods (§4) the connector implements.
   Tina never calls one that is not declared.
+- Nothing in any message is a credential. A connector reads its tracker's
+  credentials from the environment it inherited and never returns them; Tina
+  never sends any. A capability that would need to hand a token across the
+  pipe is designed the other way round — the connector does the call.
 
 ## 3. Methods
 
@@ -99,7 +106,7 @@ Declared in `initialize`'s `capabilities`; called only when declared.
 | Method | Params | Result | Purpose |
 |---|---|---|---|
 | `build_query` | `{"options": {...}, "lifecycle": {...}}` | `{"query": str}` | Build the track's query from structured inputs when the track sets no `query`. The connector owns the universal predicates — queued, unassigned, not blocked, not claimed, stable order — for its tracker. |
-| `artifact_endpoint` | `{"url": str}` | `{"url": str, "headers": {str: str}}` or `null` | For artifact verification: the API resource, and any headers, whose `GET` proves the web URL exists. `null` means "not mine"; Tina asks every configured connector and falls back to fetching the URL as given. |
+| `verify_artifact` | `{"url": str}` | `{"exists": bool}` or `null` | For artifact verification: whether the artifact behind a web URL exists, checked by the connector with its own credentials — a private repository's pull request is a 404 to an anonymous `GET`. `null` means "not mine"; Tina asks every configured connector and falls back to fetching the URL as given, anonymously. Credentials never cross the pipe. |
 
 ## 5. Errors
 
@@ -145,7 +152,7 @@ JSON block the agent sees in its prompt is what the connector sent.
 - `options` exactly as written in the track table, undeclared and unchanged.
 - No writes will be requested on a `--dry-run`, `status`, `validate`, or
   `doctor` invocation: only `initialize`, `login`, `query`, `get`, `matches`,
-  `claim_prognosis`, `claimed`, `build_query`, `artifact_endpoint`, and
+  `claim_prognosis`, `claimed`, `build_query`, `verify_artifact`, and
   `shutdown`. A connector may enforce that.
 
 ## 8. Conformance
@@ -164,7 +171,7 @@ to be tested against.
 ```toml
 [sources.<name>]
 command = ["…"]      # required: the program and its arguments
-timeout = 60         # seconds per request; optional
+timeout = 120        # seconds per request; optional
 
 [<track>]
 source = "<name>"    # selects [sources.<name>]

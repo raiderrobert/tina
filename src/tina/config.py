@@ -57,7 +57,7 @@ _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_-]*)\}")
 _SCALAR_KEYS = frozenset(
     {"harness", "executor", "tracks_dir", "control", "artifacts_dir", "models"}
 )
-_ADAPTER_TABLES = frozenset({"harnesses", "executors"})
+_ADAPTER_TABLES = frozenset({"harnesses", "executors", "sources"})
 
 #: Environment overrides for the top-level paths. One image, many mounts.
 TRACKS_DIR_VAR = "TINA_TRACKS_DIR"
@@ -225,6 +225,21 @@ class CloudRunOptions(BaseModel):
         return f"projects/{self.project}/locations/{self.region}/jobs/{self.job_name(track)}"
 
 
+class SourceCommand(BaseModel):
+    """`[sources.<name>]`: a connector process (ADR-019, docs/connector-protocol.md).
+
+    Names the program Tina launches to reach a tracker, the way `[harnesses.*]`
+    names the harness. A track whose `source` names one of these gets a
+    connector client instead of an in-process adapter.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    command: list[str] = Field(min_length=1)
+    timeout: float = Field(default=120.0, gt=0)
+
+
 class ExecutorOptions(BaseModel):
     """The `[executors.*]` tables. `local` takes none, so it has no entry."""
 
@@ -244,7 +259,8 @@ class TrackConfig(BaseModel):
     # discovers, dedupes, and delivers the work itself.
     mode: Literal["queue", "sweep"] = "queue"
     # Required for queue tracks; a sweep has neither, enforced in _check_mode.
-    source: Literal["jira", "github"] | None = None
+    # A built-in adapter name, or the name of a `[sources.<name>]` connector.
+    source: str | None = None
     # The full tracker query. Given outright, or built from the structured
     # inputs below (`tina.query`) when absent — never both.
     query: str = ""
@@ -260,6 +276,9 @@ class TrackConfig(BaseModel):
     # GitHub structured input: labels an issue must carry, all of them. The
     # repo is `repo`, required for the source anyway.
     labels: list[str] = Field(default_factory=list)
+    # `[<track>.options]`: opaque to Tina, handed to a connector process at
+    # `initialize`, which validates it (ADR-019). Invalid on a built-in source.
+    options: dict[str, Any] = Field(default_factory=dict)
     # A track is on by virtue of being present; false ships it without running
     # it. Disabled tracks are still fully validated so they cannot rot.
     enabled: bool = True
@@ -306,18 +325,6 @@ class TrackConfig(BaseModel):
             return self
         if self.source is None:
             raise ValueError('mode = "queue" requires source')
-        if self.source == "jira":
-            stray = sorted(set(_GITHUB_QUERY_KEYS) & self.model_fields_set)
-            if stray:
-                raise ValueError(f'{", ".join(stray)} only apply when source = "github"')
-            if not self.query and self.project is None:
-                raise ValueError('source = "jira" requires query or project')
-        else:
-            stray = sorted(set(_JIRA_QUERY_KEYS) & self.model_fields_set)
-            if stray:
-                raise ValueError(f'{", ".join(stray)} only apply when source = "jira"')
-            if self.blocked_transition is not None:
-                raise ValueError("blocked_transition only applies to jira tracks")
         return self
 
     @field_validator("project")
@@ -419,7 +426,12 @@ class Config(BaseModel):
     artifacts_dir: Path | None = None
     harnesses: dict[str, HarnessConfig] = Field(default_factory=dict)
     executors: ExecutorOptions = Field(default_factory=ExecutorOptions)
+    sources: dict[str, SourceCommand] = Field(default_factory=dict)
     tracks: dict[str, TrackConfig] = Field(default_factory=dict)
+
+    def connector(self, track: TrackConfig) -> SourceCommand | None:
+        """The connector process a track's source names, if it names one."""
+        return self.sources.get(track.source or "")
 
     def harness_config(self) -> HarnessConfig:
         return self.harnesses[self.harness]
@@ -535,6 +547,10 @@ def parse(
         name: _build(HarnessConfig, {"name": name, **table}, path, f"[harnesses.{name}]")
         for name, table in _tables(raw.get("harnesses", {}), path, "harnesses")
     }
+    connectors = {
+        name: _build(SourceCommand, {"name": name, **table}, path, f"[sources.{name}]")
+        for name, table in _tables(raw.get("sources", {}), path, "sources")
+    }
 
     tracks = {}
     for name, table in raw.items():
@@ -551,13 +567,14 @@ def parse(
             path,
             f"[{name}]",
         )
+        _check_source_keys(track, {str(key) for key in table}, connectors, path)
         structured = sorted(set(_JIRA_QUERY_KEYS + _GITHUB_QUERY_KEYS) & set(table))
         if table.get("query") and structured:
             raise ConfigError(
                 f"{path}: [{name}]: query is a full override; remove it or the structured"
                 f" inputs ({', '.join(structured)})"
             )
-        tracks[name] = _with_query(track)
+        tracks[name] = track if track.source in connectors else _with_query(track)
 
     config = _build(
         Config,
@@ -575,6 +592,7 @@ def parse(
             "models": raw.get("models", []),
             "harnesses": harnesses,
             "executors": dict(_tables(raw.get("executors", {}), path, "executors")),
+            "sources": connectors,
             "tracks": tracks,
         },
         path,
@@ -583,6 +601,61 @@ def parse(
     _validate_names(config)
     _validate_model(config)
     return config
+
+
+#: Keys that configure a built-in adapter. On a connector track they belong
+#: under [<track>.options] instead, in the connector's own vocabulary.
+_BUILT_IN_KEYS = (
+    *_JIRA_QUERY_KEYS,
+    *_GITHUB_QUERY_KEYS,
+    "repo",
+    "claim_transition",
+    "blocked_transition",
+)
+
+
+def _check_source_keys(
+    track: TrackConfig, given: set[str], connectors: dict[str, SourceCommand], path: Path
+) -> None:
+    """Which keys a track may carry depends on what its source is.
+
+    A `[sources.<name>]` table makes the source a connector process — even
+    when the name is one of the built-in adapters, which is how Tina's own
+    connectors go through the same door (ADR-019). Then the built-in keys are
+    refused and `options` is the connector's. Without such a table the source
+    is the built-in adapter, `options` is meaningless, and the per-source key
+    rules apply.
+    """
+    if track.mode == "sweep" or track.source is None:
+        return
+    where = f"{path}: [{track.name}]"
+    if track.source in connectors:
+        stray = sorted(set(_BUILT_IN_KEYS) & given)
+        if stray:
+            raise ConfigError(
+                f"{where}: {', '.join(stray)} are built-in source keys; a connector takes its"
+                f" keys under [{track.name}.options]"
+            )
+        return
+    if track.source not in SOURCES:
+        return  # _validate_names names the unknown source
+    if "options" in given:
+        raise ConfigError(
+            f"{where}: options only applies to a connector; source {track.source!r} is built in",
+            fix=f"Add a [sources.{track.source}] table with a command, or move the keys up.",
+        )
+    if track.source == "jira":
+        stray = sorted(set(_GITHUB_QUERY_KEYS) & given)
+        if stray:
+            raise ConfigError(f'{where}: {", ".join(stray)} only apply when source = "github"')
+        if not track.query and track.project is None:
+            raise ConfigError(f'{where}: source = "jira" requires query or project')
+    else:
+        stray = sorted(set(_JIRA_QUERY_KEYS) & given)
+        if stray:
+            raise ConfigError(f'{where}: {", ".join(stray)} only apply when source = "jira"')
+        if track.blocked_transition is not None:
+            raise ConfigError(f"{where}: blocked_transition only applies to jira tracks")
 
 
 def _with_query(track: TrackConfig) -> TrackConfig:
@@ -646,7 +719,17 @@ def _validate_names(config: Config) -> None:
             f"(supported: {', '.join(EXECUTORS)})"
         )
     for track in config.tracks.values():
-        if track.source == "github" and not track.repo:
+        if (
+            track.source is not None
+            and track.source not in SOURCES
+            and track.source not in config.sources
+        ):
+            known = ", ".join(sorted({*SOURCES, *config.sources})) or "none"
+            raise ConfigError(
+                f"{config.path}: [{track.name}]: unknown source {track.source!r} (known: {known})",
+                fix="Name a built-in source, or add a [sources.<name>] table with its command.",
+            )
+        if track.source == "github" and track.source not in config.sources and not track.repo:
             raise ConfigError(
                 f"{config.path}: [{track.name}]: source 'github' requires repo = \"owner/name\""
             )

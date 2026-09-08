@@ -144,14 +144,15 @@ def _track(config: Config, name: str, build_source: SourceBuilder) -> Iterator[C
     if track.mode == "sweep":
         return
     try:
-        source = build_source(track)
+        source = build_source(track, config=config)
         identity = source.login()
     except TinaError as exc:
         yield Check(f"[{name}] {track.source} credentials", False, f"{exc} {exc.fix}".strip())
         return
     yield Check(f"[{name}] {track.source} credentials", True, f"acting as {identity}")
     try:
-        matched = len(source.query(track.query))
+        query = track.query or str(getattr(source, "build_query", lambda: "")() or "")
+        matched = len(source.query(query))
     except TinaError as exc:
         yield Check(f"[{name}] query", False, str(exc))
         return

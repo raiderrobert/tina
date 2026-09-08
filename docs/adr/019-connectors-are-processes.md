@@ -52,8 +52,9 @@ it over standard streams in a small JSON-RPC protocol —
 `initialize` handshake that carries a protocol version and the track's
 connector-specific options, and two optional capabilities, `build_query`
 (structured inputs → a query, what `tina.query` does today) and
-`artifact_endpoint` (a web URL → the API resource that proves it exists, what
-`verify.api_url` does today).
+`verify_artifact` (does the artifact behind this web URL exist — the check
+`verify.api_url` enables today, done by the connector with its own
+credentials, so no token ever crosses the pipe).
 
 Configuration names the connector the way it names the harness, and moves
 every connector-specific key out of Tina's schema into a table the connector
@@ -137,7 +138,7 @@ reopen.
   `[<track>.options]`) and ships with an upgrade note.
 - `tina.query` and the tracker-specific half of `tina.verify` move into the
   connectors that own that knowledge, behind `build_query` and
-  `artifact_endpoint`.
+  `verify_artifact`.
 - Tina owns subprocess lifecycle for one more family: spawn on first use, one
   connector process per Tina invocation, a per-request timeout, `shutdown`
   then a grace period then `kill`. A connector that dies is a `SourceError`

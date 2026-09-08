@@ -18,6 +18,7 @@ cloudrun = [
 
 [project.scripts]
 tina = "tina.cli:main"
+tina-source-github = "tina.connectors.github:main"
 
 [project.urls]
 Homepage = "https://github.com/raiderrobert/tina"
@@ -46,4 +47,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "PTH"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `tests.fakes` is importable in-process and runnable as `python -m` from the
+# repo root — the fake connector is used both ways.
+pythonpath = ["."]
 addopts = "-q"
