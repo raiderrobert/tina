@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/raiderrobert/tina/compare/v0.1.2...v0.1.4) (2026-09-08)
+
+
+### Features
+
+* close the remaining gaps to a production factory ([#32](https://github.com/raiderrobert/tina/issues/32) P2–P5) ([#62](https://github.com/raiderrobert/tina/issues/62)) ([5a3ee4a](https://github.com/raiderrobert/tina/commit/5a3ee4aa661ef43aff930d202c940bb1173fcaa2))
+
 ## [0.1.2](https://github.com/raiderrobert/tina/compare/v0.1.1...v0.1.2) (2026-08-27)
 
 
