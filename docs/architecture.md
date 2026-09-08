@@ -118,9 +118,9 @@ of the query, and Tina builds it (`tina.query`):
 [vul]
 source = "jira"
 project = "VUL"
-extra = "labels not in (risk-exception)"
+extra = "labels not in (wontfix)"
 [vul.filters]
-Squad = ["Reporting", "Site Experience"]     # onboarding a team is one line
+Team = ["Payments", "Search"]     # onboarding a team is one line
 
 [smoke]
 source = "github"

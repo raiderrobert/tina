@@ -7,8 +7,8 @@ def test_jira_query_builds_the_universal_predicates_in_order() -> None:
     jql = query.jira_query(
         "VUL",
         None,
-        {"Squad": ["Reporting", "Site Experience"]},
-        "labels not in (risk-exception)",
+        {"Team": ["Payments", "Search"]},
+        "labels not in (wontfix)",
         claim_policy="assign",
         claim_label=None,
         claim_transition=None,
@@ -16,9 +16,9 @@ def test_jira_query_builds_the_universal_predicates_in_order() -> None:
     )
 
     assert jql == (
-        'project = VUL AND status = "Open" AND "Squad" in ("Reporting", "Site Experience")'
+        'project = VUL AND status = "Open" AND "Team" in ("Payments", "Search")'
         ' AND assignee IS EMPTY AND (labels IS EMPTY OR labels not in ("tina-blocked"))'
-        " AND (labels not in (risk-exception)) ORDER BY created ASC"
+        " AND (labels not in (wontfix)) ORDER BY created ASC"
     )
 
 

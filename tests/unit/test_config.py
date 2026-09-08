@@ -526,10 +526,10 @@ command = ["pi", "--prompt-file", "{prompt_file}"]
 [vul]
 source = "jira"
 project = "VUL"
-extra = "labels not in (risk-exception)"
+extra = "labels not in (wontfix)"
 
 [vul.filters]
-Squad = ["Reporting", "Site Experience"]
+Team = ["Payments", "Search"]
 """
 
 
@@ -537,9 +537,9 @@ def test_jira_structured_inputs_build_the_query(tmp_path: Path) -> None:
     cfg = config.load(write(tmp_path, JIRA_PARTS))
 
     assert cfg.track("vul").query == (
-        'project = VUL AND status = "Open" AND "Squad" in ("Reporting", "Site Experience")'
+        'project = VUL AND status = "Open" AND "Team" in ("Payments", "Search")'
         ' AND assignee IS EMPTY AND (labels IS EMPTY OR labels not in ("tina-blocked"))'
-        " AND (labels not in (risk-exception)) ORDER BY created ASC"
+        " AND (labels not in (wontfix)) ORDER BY created ASC"
     )
 
 
@@ -548,7 +548,7 @@ def test_a_blocked_transition_drops_the_label_guard_from_the_built_query(tmp_pat
     cfg = config.load(write(tmp_path, text))
 
     assert 'labels not in ("tina-blocked")' not in cfg.track("vul").query
-    assert "(labels not in (risk-exception))" in cfg.track("vul").query, "extra still applies"
+    assert "(labels not in (wontfix))" in cfg.track("vul").query, "extra still applies"
     assert cfg.track("vul").blocked_transition == "Blocked"
 
 
@@ -592,14 +592,14 @@ def test_a_jira_track_needs_a_query_or_a_project(tmp_path: Path) -> None:
     ("snippet", "message"),
     [
         ('project = "VUL; DROP"', "project key"),
-        ('[vul.filters]\nSquad = ["Team \\" OR 1=1"]', "filter value"),
-        ("[vul.filters]\nSquad = []", "at least one value"),
-        ('[vul.filters]\n"Squad)" = ["x"]', "filter field"),
+        ('[vul.filters]\nTeam = ["Team \\" OR 1=1"]', "filter value"),
+        ("[vul.filters]\nTeam = []", "at least one value"),
+        ('[vul.filters]\n"Team)" = ["x"]', "filter field"),
     ],
 )
 def test_interpolated_jira_values_are_validated(tmp_path: Path, snippet: str, message: str) -> None:
-    text = JIRA_PARTS.replace('extra = "labels not in (risk-exception)"', "").replace(
-        '[vul.filters]\nSquad = ["Reporting", "Site Experience"]', ""
+    text = JIRA_PARTS.replace('extra = "labels not in (wontfix)"', "").replace(
+        '[vul.filters]\nTeam = ["Payments", "Search"]', ""
     )
     text = text.replace('project = "VUL"', 'project = "VUL"\n' + snippet, 1)
     if 'project = "VUL; DROP"' in snippet:

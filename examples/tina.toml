@@ -89,9 +89,9 @@ result = "github:pr"        # declaration only — the agent produces it
 # source = "jira"
 # project = "VUL"
 # status = "Open"                       # the default
-# extra = "labels not in (risk-exception)"
+# extra = "labels not in (wontfix)"
 # [vul-by-team.filters]
-# Squad = ["Reporting", "Site Experience"]
+# Team = ["Payments", "Search"]
 
 [bug]
 source = "github"

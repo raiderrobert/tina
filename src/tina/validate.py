@@ -83,7 +83,7 @@ _REF_RULES = (
     ),
 )
 
-# `<!-- shared: vul/references/squad-slugs.md -->` — first line of a duplicated
+# `<!-- shared: vul/references/ecosystems.md -->` — first line of a duplicated
 # reference file, naming its canonical copy relative to tracks_dir.
 _SHARED_MARKER = re.compile(
     r"\A<!--\s*shared:\s*([A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.md)\s*-->[ \t]*\n\n?"
