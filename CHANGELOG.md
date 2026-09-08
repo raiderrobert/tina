@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.5](https://github.com/raiderrobert/tina/compare/v0.1.4...v0.1.5) (2026-09-08)
+
+
+### Features
+
+* **github:** GITHUB_TOKEN_COMMAND refreshes a short-lived token on 401 ([#66](https://github.com/raiderrobert/tina/issues/66)) ([b7bd398](https://github.com/raiderrobert/tina/commit/b7bd398cd3f57ac0f2853661d271bf32d6b3b308))
+
+
+### Bug Fixes
+
+* **github:** a comma-list label qualifier is any-of in the re-check ([#65](https://github.com/raiderrobert/tina/issues/65)) ([e220279](https://github.com/raiderrobert/tina/commit/e2202792800a1ca0cae979e721db8614828ebc62))
+
 ## [0.1.4](https://github.com/raiderrobert/tina/compare/v0.1.2...v0.1.4) (2026-09-08)
 
 
