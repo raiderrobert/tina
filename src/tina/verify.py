@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from tina import credentials
 from tina.log import get_logger
 from tina.models import OutcomeReport, OutcomeStatus
 
@@ -57,6 +58,8 @@ def _exists(client: httpx.Client, url: str) -> bool:
     target = api_url(url)
     try:
         response = client.get(target, headers=auth_headers(target))
+        if response.status_code == 401 and _refresh_github_token(target):
+            response = client.get(target, headers=auth_headers(target))
     except httpx.HTTPError as exc:
         # A network error is a failed check, not an excuse to skip one.
         log.warning("artifact unreachable", extra={"url": url, "error": str(exc)})
@@ -127,6 +130,27 @@ def _github_api(path: str, fragment: str) -> str | None:
     return None
 
 
+def _refresh_github_token(url: str) -> bool:
+    """Re-mint a short-lived GitHub token into the environment, when the
+    deployment configured a command for one and the URL is GitHub's. True
+    when a fresh token was placed, so the caller retries once."""
+    command = credentials.token_command(credentials.GITHUB_TOKEN_COMMAND)
+    if command is None or not _is_github(url):
+        return False
+    os.environ["GITHUB_TOKEN"] = credentials.run_token_command(
+        command, credentials.GITHUB_TOKEN_COMMAND
+    )
+    return True
+
+
+def _is_github(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower()
+    api_host = (
+        urlsplit(os.environ.get("GITHUB_API_URL") or "https://api.github.com").hostname or ""
+    ).lower()
+    return _matches(host, "github.com") or host == api_host
+
+
 def auth_headers(url: str) -> dict[str, str]:
     """Best-effort credentials for a result system, from the environment.
 
@@ -139,10 +163,7 @@ def auth_headers(url: str) -> dict[str, str]:
         return {}
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    api_host = (
-        urlsplit(os.environ.get("GITHUB_API_URL") or "https://api.github.com").hostname or ""
-    ).lower()
-    if token and (_matches(host, "github.com") or host == api_host):
+    if token and _is_github(url):
         return {"Authorization": f"Bearer {token}"}
 
     jira_base = os.environ.get("JIRA_BASE_URL")

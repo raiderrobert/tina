@@ -225,3 +225,24 @@ def test_gh_token_is_accepted_for_github_auth(monkeypatch: pytest.MonkeyPatch) -
     assert verify.auth_headers("https://api.github.com/repos/a/b") == {
         "Authorization": "Bearer ghp_cli"
     }
+
+
+def test_verification_re_mints_a_github_token_on_401(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    script = tmp_path / "mint.py"
+    script.write_text("print('ghs_fresh')")
+    monkeypatch.setenv("GITHUB_TOKEN_COMMAND", f"{__import__('sys').executable} {script}")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_stale")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("Authorization", ""))
+        return httpx.Response(200 if seen[-1] == "Bearer ghs_fresh" else 401)
+
+    result = verify.verify(
+        report(OutcomeStatus.RESOLVED, "https://github.com/acme/api/pull/7"), client(handler)
+    )
+
+    assert result.verified is True
+    assert seen == ["Bearer ghs_stale", "Bearer ghs_fresh"]
