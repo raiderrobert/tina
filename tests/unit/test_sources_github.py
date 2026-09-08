@@ -596,3 +596,29 @@ def test_login_reports_who_the_token_acts_as() -> None:
         return httpx.Response(200, json={"login": "acme-bot"})
 
     assert source(handler, bot_login=None).login() == "acme-bot"
+
+
+# --- label lists in the re-check ------------------------------------------------
+
+
+def test_a_comma_list_label_qualifier_is_any_of() -> None:
+    """`label:fix,chore` is GitHub search's OR; the re-check must read it that way."""
+    q = "is:open no:assignee label:triaged label:fix,refactor,chore -label:blocked"
+    assert matching_source(issue(labels=["triaged", "fix"])).matches("42", q) is True
+    assert matching_source(issue(labels=["triaged", "chore"])).matches("42", q) is True
+    assert matching_source(issue(labels=["triaged", "docs"])).matches("42", q) is False
+    assert matching_source(issue(labels=["fix"])).matches("42", q) is False, (
+        "the other label: still ANDs"
+    )
+
+
+def test_a_negated_comma_list_excludes_any_of_them() -> None:
+    q = "is:open -label:blocked,wontfix"
+    assert matching_source(issue(labels=["bug"])).matches("42", q) is True
+    assert matching_source(issue(labels=["wontfix"])).matches("42", q) is False
+    assert matching_source(issue(labels=["blocked"])).matches("42", q) is False
+
+
+def test_quoted_labels_in_a_list_are_unquoted() -> None:
+    q = 'is:open label:"needs triage","good first issue"'
+    assert matching_source(issue(labels=["good first issue"])).matches("42", q) is True
