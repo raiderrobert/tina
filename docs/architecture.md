@@ -329,6 +329,14 @@ configured (`JIRA_BOT_ACCOUNT_ID`, `GITHUB_BOT_LOGIN`) or looked up once from
 the credentials (`/myself`, `/user`), so a deployment that rotates the bot
 account changes one secret and nothing else.
 
+Short-lived credentials are the deployment's scheme, not Tina's, but Tina
+makes one possible: `GITHUB_TOKEN_COMMAND` names a command whose stdout is
+the current token — a credential helper the image already ships for the
+agent's own tools. Tina runs it to start and again when GitHub answers 401
+mid-run (a token that aged out during an hour-long run), then retries the
+request once; artifact verification does the same. Nothing is minted by
+Tina, and a deployment with long-lived tokens sets nothing.
+
 `matches` is the eligibility re-check: between dispatch and worker start an
 item can be assigned, closed, labeled, or worked by a human, and only the
 claim would notice — and only the assignee case. The worker re-checks the

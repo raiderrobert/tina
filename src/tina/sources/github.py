@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
+from tina import credentials
 from tina.log import get_logger
 from tina.models import WorkItem
 from tina.sources.base import (
@@ -131,13 +132,22 @@ class GitHubSource:
         self.claim_label = claim_label
         self.api_base = (api_base or os.environ.get("GITHUB_API_URL") or API_BASE).rstrip("/")
         self._bot_login = bot_login or os.environ.get("GITHUB_BOT_LOGIN")
+        # A deployment minting short-lived tokens names the command that
+        # produces one; it is re-run on a 401 and the request retried once.
+        self._token_command = credentials.token_command(credentials.GITHUB_TOKEN_COMMAND)
         if client is None:
-            token = require_env("GITHUB_TOKEN", "github", "GH_TOKEN")
+            token = self._fresh_token() or require_env("GITHUB_TOKEN", "github", "GH_TOKEN")
             client = httpx.Client(
                 headers={"Authorization": f"Bearer {token}", "Accept": ACCEPT},
                 timeout=30.0,
             )
         self.client = client
+
+    def _fresh_token(self) -> str | None:
+        """Run the token command, when there is one."""
+        if self._token_command is None:
+            return None
+        return credentials.run_token_command(self._token_command, credentials.GITHUB_TOKEN_COMMAND)
 
     @property
     def bot_login(self) -> str:
@@ -285,6 +295,11 @@ class GitHubSource:
                 "github",
                 f"{method} {path}",
             )
+            if response.status_code == 401 and self._token_command is not None:
+                # The token aged out mid-run. Mint again, retry exactly once; a
+                # second 401 is a real refusal and raises like any other.
+                self.client.headers["Authorization"] = f"Bearer {self._fresh_token()}"
+                response = self.client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             raise SourceError(f"github: {method} {path} failed: {exc}") from exc
         if response.status_code >= 400:

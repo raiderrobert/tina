@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from typing import Any
 
 import httpx
@@ -622,3 +623,79 @@ def test_a_negated_comma_list_excludes_any_of_them() -> None:
 def test_quoted_labels_in_a_list_are_unquoted() -> None:
     q = 'is:open label:"needs triage","good first issue"'
     assert matching_source(issue(labels=["good first issue"])).matches("42", q) is True
+
+
+# --- short-lived tokens ---------------------------------------------------------
+
+
+def _token_command(monkeypatch: pytest.MonkeyPatch, tokens: list[str], tmp_path) -> None:
+    """A fake mint: each run hands out the next token in the list."""
+    counter = tmp_path / "n"
+    script = tmp_path / "mint.py"
+    script.write_text(
+        "import pathlib\n"
+        f"counter = pathlib.Path({str(counter)!r})\n"
+        "n = int(counter.read_text()) if counter.exists() else 0\n"
+        "counter.write_text(str(n + 1))\n"
+        f"print({tokens!r}[n])\n"
+    )
+    monkeypatch.setenv("GITHUB_TOKEN_COMMAND", f"{sys.executable} {script}")
+
+
+def test_the_token_command_supplies_the_initial_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _token_command(monkeypatch, ["ghs_first"], tmp_path)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    src = GitHubSource(repo=REPO)
+
+    assert src.client.headers["Authorization"] == "Bearer ghs_first"
+
+
+def test_a_401_re_mints_and_retries_once(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The token aged out mid-run: mint again, retry the request, carry on."""
+    _token_command(monkeypatch, ["ghs_fresh"], tmp_path)
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers["Authorization"]
+        seen.append(auth)
+        if auth == "Bearer ghs_fresh":
+            return httpx.Response(200, json=issue())
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), headers={"Authorization": "Bearer ghs_stale"}
+    )
+    src = GitHubSource(repo=REPO, client=client, bot_login=BOT)
+
+    assert src.get("42").id == "acme/api#42"
+    assert seen == ["Bearer ghs_stale", "Bearer ghs_fresh"], "one retry, with the fresh token"
+    assert src.client.headers["Authorization"] == "Bearer ghs_fresh", "kept for later calls"
+
+
+def test_a_second_401_is_a_real_refusal(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _token_command(monkeypatch, ["ghs_fresh"], tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Bad credentials"})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), headers={"Authorization": "Bearer ghs_stale"}
+    )
+    with pytest.raises(SourceError, match="401"):
+        GitHubSource(repo=REPO, client=client, bot_login=BOT).get("42")
+
+
+def test_without_a_token_command_a_401_is_not_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401)
+
+    with pytest.raises(SourceError, match="401"):
+        source(handler).get("42")
+    assert calls == 1
