@@ -31,8 +31,9 @@ def work_item() -> WorkItem:
     )
 
 
-def clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove adapter inputs that could make tests use the host configuration."""
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adapters read credentials from the environment; keep the real ones out."""
     for name in (
         "JIRA_BASE_URL",
         "JIRA_EMAIL",
@@ -51,9 +52,3 @@ def clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "CLOUD_RUN_EXECUTION",
     ):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Adapters read credentials from the environment; keep the real ones out."""
-    clear_adapter_env(monkeypatch)
