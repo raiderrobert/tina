@@ -31,20 +31,29 @@ def work_item() -> WorkItem:
     )
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Adapters read credentials from the environment; keep the real ones out."""
+def clear_adapter_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove adapter inputs that could make tests use the host configuration."""
     for name in (
         "JIRA_BASE_URL",
         "JIRA_EMAIL",
         "JIRA_API_TOKEN",
         "JIRA_BOT_ACCOUNT_ID",
         "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN_COMMAND",
         "GITHUB_BOT_LOGIN",
         "GITHUB_API_URL",
         "TINA_HARNESS_TIMEOUT",
+        "TINA_TRACKS_DIR",
+        "TINA_ARTIFACTS_DIR",
         "TINA_CONTROL",
         "TINA_CONTROL_INLINE",
         "CLOUD_RUN_EXECUTION",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adapters read credentials from the environment; keep the real ones out."""
+    clear_adapter_env(monkeypatch)
