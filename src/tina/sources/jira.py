@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from tina.log import get_logger
 from tina.models import WorkItem
+from tina.query import ORDER_BY
 from tina.sources.base import (
     ClaimPrognosis,
     RetryRule,
@@ -47,10 +48,6 @@ RETRY_RULES = (
 #: — it means the opposite, and silently inverting it would report the wrong
 #: number.
 EMPTY_ASSIGNEE = re.compile(r"\bassignee\s*(?:=|\bIS\b)\s*(?:EMPTY|NULL)\b", re.IGNORECASE)
-
-#: A trailing ORDER BY, stripped before the query is scoped to one item —
-#: it cannot sit inside the parenthesized predicate.
-ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE | re.DOTALL)
 
 
 class SearchRequest(BaseModel):

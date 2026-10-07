@@ -21,7 +21,8 @@ table name.
 
 A track may name its query outright, or give the parts and let Tina build it
 (`tina.query`): a Jira `project` plus `filters`, or a GitHub `repo` plus
-`labels`. Onboarding a team is then one array edit.
+`labels`. Onboarding a team is then one array edit. A Jira track that writes
+its own `query` may still add `filters`, which narrow it.
 
 Three environment variables override the top-level paths, so one image runs
 against configs mounted anywhere: `TINA_TRACKS_DIR`, `TINA_ARTIFACTS_DIR`, and
@@ -99,6 +100,9 @@ _QUEUE_ONLY_KEYS = frozenset(
 #: the other source's set is a config bug, named at load.
 _JIRA_QUERY_KEYS = ("project", "status", "filters", "extra")
 _GITHUB_QUERY_KEYS = ("labels",)
+#: The structured inputs a full `query` replaces. `filters` is absent: it
+#: narrows a full Jira query instead of building one.
+_OVERRIDDEN_KEYS = ("project", "status", "extra", "labels")
 
 # Values the query builders interpolate. Validated here so the builders can
 # concatenate without escaping: a team name with a quote in it is at best a
@@ -246,7 +250,8 @@ class TrackConfig(BaseModel):
     # Required for queue tracks; a sweep has neither, enforced in _check_mode.
     source: Literal["jira", "github"] | None = None
     # The full tracker query. Given outright, or built from the structured
-    # inputs below (`tina.query`) when absent — never both.
+    # inputs below (`tina.query`) when absent — never both. On a Jira track,
+    # `filters` narrows a full query instead (`tina.query.jira_scope`).
     query: str = ""
     track: str
     # Jira structured inputs: the project searched, the status an item must be
@@ -551,7 +556,7 @@ def parse(
             path,
             f"[{name}]",
         )
-        structured = sorted(set(_JIRA_QUERY_KEYS + _GITHUB_QUERY_KEYS) & set(table))
+        structured = sorted(set(_OVERRIDDEN_KEYS) & set(table))
         if table.get("query") and structured:
             raise ConfigError(
                 f"{path}: [{name}]: query is a full override; remove it or the structured"
@@ -586,10 +591,17 @@ def parse(
 
 
 def _with_query(track: TrackConfig) -> TrackConfig:
-    """Fill in the query a track gave the parts of. A sweep or a full override
-    passes through untouched."""
-    if track.mode == "sweep" or track.query:
+    """Fill in the query a track gave the parts of, or narrow a full Jira
+    query by its filters. A sweep or an unfiltered override passes through
+    untouched."""
+    if track.mode == "sweep":
         return track
+    if track.query:
+        if not track.filters:
+            return track
+        return track.model_copy(
+            update={"query": query_builders.jira_scope(track.query, track.filters)}
+        )
     if track.source == "jira":
         built = query_builders.jira_query(
             str(track.project),

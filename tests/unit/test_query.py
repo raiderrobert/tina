@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tina import query
 
 
@@ -70,3 +72,27 @@ def test_github_query_with_nothing_optional() -> None:
     q = query.github_query("acme/api", [], claim_label=None, blocked_label=None)
 
     assert q == "repo:acme/api is:issue is:open no:assignee"
+
+
+@pytest.mark.parametrize(
+    ("full", "expected"),
+    [
+        (
+            "cf[100] is EMPTY ORDER BY updated DESC",
+            '(cf[100] is EMPTY) AND "Team" in ("Payments", "Search") ORDER BY updated DESC',
+        ),
+        (
+            "project = A OR project = B",
+            '(project = A OR project = B) AND "Team" in ("Payments", "Search")',
+        ),
+        (
+            "status = Done\norder by key",
+            '(status = Done) AND "Team" in ("Payments", "Search")\norder by key',
+        ),
+    ],
+)
+def test_jira_scope_narrows_a_full_query_without_the_invariants(full: str, expected: str) -> None:
+    jql = query.jira_scope(full, {"Team": ["Payments", "Search"]})
+
+    assert jql == expected
+    assert "assignee" not in jql

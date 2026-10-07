@@ -27,13 +27,18 @@ interpolated value is validated at load — project key, field name, value
 charset, repo shape, no quotes in labels — so the builders concatenate
 without escaping. `query` stays the full override for anything that does not
 fit; a track may not set both, and the error names the structured keys it
-would have to drop.
+would have to drop. The exception is `filters` on a Jira track: with a full
+`query` it narrows that query, as `(<query>) AND "Field" in (...)` ahead of
+any trailing `ORDER BY`, and adds none of the builder's invariants.
 
 ## Consequences
 
 - Onboarding is one array edit, reviewable by someone who is not the author.
 - The universal predicates live in one place. A track that needs to relax
   them writes `query` and takes on the whole string, explicitly.
+- A track whose query selects existing items rather than a work queue
+  (several projects, closed or assigned items, a different sort) writes
+  `query` and still opts teams in through `filters`.
 - Structured inputs are per source and the sets are disjoint; a Jira key on
   a GitHub track is a load-time error, not an ignored key.
 - The builders are pure string functions imported by the config module, so

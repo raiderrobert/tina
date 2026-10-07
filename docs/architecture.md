@@ -135,7 +135,12 @@ in the queued status are offered back — the transition, not the assignee, is
 what excludes an item, so one still queued was reopened upstream. Every value
 interpolated is validated at load (charset, shape): a team name with a quote
 in it is at best a broken query. `query` remains the full override for
-anything that does not fit; a track may not set both.
+anything that does not fit; a track may not set both. The one exception is
+`filters` on a Jira track: alongside a full `query` it narrows that query,
+wrapped as `(<query>) AND "Field" in (...)` ahead of any `ORDER BY`, and adds
+none of the builder's invariants. A query that selects existing items rather
+than a work queue (several projects, closed or assigned items, a different
+sort) keeps its own JQL and still onboards teams with one array edit.
 
 ### Sweep tracks
 

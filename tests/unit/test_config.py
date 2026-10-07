@@ -574,10 +574,37 @@ claim_label = "bot-claimed"
     )
 
 
-def test_query_and_structured_inputs_are_mutually_exclusive(tmp_path: Path) -> None:
-    text = JIRA_PARTS.replace('project = "VUL"', 'project = "VUL"\nquery = "project = VUL"')
+@pytest.mark.parametrize("key", ['project = "VUL"', 'status = "Open"', 'extra = "x = 1"'])
+def test_query_and_structured_inputs_are_mutually_exclusive(tmp_path: Path, key: str) -> None:
+    text = MINIMAL + key + "\n"
 
     with pytest.raises(config.ConfigError, match="query is a full override"):
+        config.load(write(tmp_path, text))
+
+
+def test_filters_narrow_a_full_jira_query(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'query = "project = VUL"',
+        'query = "project in (A, B) OR labels = x ORDER BY updated DESC"',
+    )
+    text += '\n[vul.filters]\nTeam = ["Payments", "Search"]\n'
+
+    cfg = config.load(write(tmp_path, text))
+
+    assert cfg.track("vul").query == (
+        '(project in (A, B) OR labels = x) AND "Team" in ("Payments", "Search")'
+        " ORDER BY updated DESC"
+    )
+
+
+def test_filters_on_a_full_github_query_are_refused(tmp_path: Path) -> None:
+    text = MINIMAL.replace(
+        'source = "jira"\nquery = "project = VUL"',
+        'source = "github"\nrepo = "acme/api"\nquery = "repo:acme/api"',
+    )
+    text += '\n[vul.filters]\nTeam = ["Payments"]\n'
+
+    with pytest.raises(config.ConfigError, match='only apply when source = "jira"'):
         config.load(write(tmp_path, text))
 
 

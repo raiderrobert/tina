@@ -34,7 +34,7 @@ DESCRIPTIONS: dict[str, str] = {
     "query": (
         "The full tracker query (JQL, or GitHub issue-search syntax). Given outright, or built "
         "from the structured inputs (`project`/`status`/`filters`/`extra`, or `repo`/`labels`) "
-        "when absent — never both."
+        "when absent — never both. A Jira `query` may still take `filters`, which narrow it."
     ),
     "track": "The skill directory under `tracks_dir`. Defaults to the table name.",
     "project": "Jira structured input: the project key searched.",
@@ -44,7 +44,9 @@ DESCRIPTIONS: dict[str, str] = {
     ),
     "filters": (
         "Jira structured input: a table of field name to allowed values, each becoming a "
-        '`"Field" in (...)` clause. Teams opt in by adding one value.'
+        '`"Field" in (...)` clause. Teams opt in by adding one value. Alongside a full `query`, '
+        "the clauses are ANDed onto it, before any `ORDER BY`, with none of the built query's "
+        "invariants."
     ),
     "extra": "Jira structured input: a predicate appended as `AND (...)`.",
     "labels": "GitHub structured input: labels an issue must carry (all of them).",

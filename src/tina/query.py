@@ -6,7 +6,8 @@ one string to an array, in a PR a non-author can review, without anyone
 editing a JQL expression. The builders here own the invariants every track
 would otherwise re-type into every query string: open, unassigned, not
 blocked, not claimed, stable sort order. `query` on the track stays the full
-override for anything that does not fit.
+override for anything that does not fit, and `jira_scope` narrows such a
+query by the same `filters` without imposing those invariants.
 
 Every value interpolated here has been validated by the config model
 (charset, shape) before it arrives, so the builders concatenate without
@@ -15,6 +16,12 @@ here touches a tracker.
 """
 
 from __future__ import annotations
+
+import re
+
+#: A trailing ORDER BY. It cannot sit inside a parenthesized predicate, so it
+#: is split off before a query is wrapped and narrowed.
+ORDER_BY = re.compile(r"\s+ORDER\s+BY\s+.*$", re.IGNORECASE | re.DOTALL)
 
 #: The status a Jira track reads from when it sets none. A workflow label the
 #: tracker owns, not Tina, so it is a config knob rather than a constant.
@@ -44,9 +51,7 @@ def jira_query(
     issues that have no labels at all.
     """
     clauses = [f"project = {project}", f'status = "{status or DEFAULT_JIRA_STATUS}"']
-    for field, values in filters.items():
-        quoted = ", ".join(f'"{value}"' for value in values)
-        clauses.append(f'"{field}" in ({quoted})')
+    clauses += _filter_clauses(filters)
     if claim_policy == "assign" and claim_transition:
         clauses.append("(assignee IS EMPTY OR assignee = currentUser())")
     else:
@@ -58,6 +63,28 @@ def jira_query(
     if extra:
         clauses.append(f"({extra})")
     return " AND ".join(clauses) + " ORDER BY created ASC"
+
+
+def jira_scope(query: str, filters: dict[str, list[str]]) -> str:
+    """A full JQL query narrowed by `filters`, its own predicates untouched.
+
+    The query is parenthesized so a top-level `OR` in it cannot swallow the
+    filter clauses, and its trailing ORDER BY, if any, is kept at the end.
+    None of `jira_query`'s invariants are added: a track that writes `query`
+    owns status, assignee, and sort order.
+    """
+    match = ORDER_BY.search(query)
+    predicate = query[: match.start()] if match else query
+    order = match.group(0) if match else ""
+    return " AND ".join([f"({predicate.strip()})", *_filter_clauses(filters)]) + order
+
+
+def _filter_clauses(filters: dict[str, list[str]]) -> list[str]:
+    clauses = []
+    for field, values in filters.items():
+        quoted = ", ".join(f'"{value}"' for value in values)
+        clauses.append(f'"{field}" in ({quoted})')
+    return clauses
 
 
 def github_query(

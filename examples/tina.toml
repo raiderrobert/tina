@@ -92,6 +92,16 @@ result = "github:pr"        # declaration only — the agent produces it
 # extra = "labels not in (wontfix)"
 # [vul-by-team.filters]
 # Team = ["Payments", "Search"]
+#
+# A Jira track that writes its own query may still take `filters`. They are
+# ANDed onto the query ahead of its ORDER BY, and none of the invariants above
+# are added:
+# [classify]
+# source = "jira"
+# claim = "none"
+# query = "cf[12345] is EMPTY AND updated >= -90d ORDER BY updated DESC"
+# [classify.filters]
+# Team = ["Payments", "Search"]
 
 [bug]
 source = "github"
