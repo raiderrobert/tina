@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/raiderrobert/tina/compare/v0.1.5...v0.1.6) (2026-10-07)
+
+
+### Features
+
+* **config:** filters narrow a full Jira query ([a63baf8](https://github.com/raiderrobert/tina/commit/a63baf8ca009c16d146e42db64713732e85f1c14)), closes [#110](https://github.com/raiderrobert/tina/issues/110)
+
 ## [0.1.5](https://github.com/raiderrobert/tina/compare/v0.1.4...v0.1.5) (2026-09-08)
 
 
