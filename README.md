@@ -95,6 +95,7 @@ without Tina knowing about them.
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](docs/architecture.md) | System design — tracks, dispatch/worker, adapters, outcome contract, v1 scope |
+| [docs/connector-protocol.md](docs/connector-protocol.md) | Proposed: the wire contract a connector in any language implements |
 | [docs/adr/](docs/adr/) | Architecture decision records — the reasoning behind each design choice |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, the check loop, layout, how to add adapters, commit conventions |
 
