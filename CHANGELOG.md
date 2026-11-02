@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.7](https://github.com/dynamite-systems/tina/compare/v0.1.6...v0.1.7) (2026-11-02)
+
+
+### Features
+
+* allow callers to customize execution boundaries ([#113](https://github.com/dynamite-systems/tina/issues/113)) ([92c5eb3](https://github.com/dynamite-systems/tina/commit/92c5eb340ae4cc93888507159813e12d18e4e1cc))
+
+
+### Bug Fixes
+
+* **tests:** clean all adapter environment inputs ([#109](https://github.com/dynamite-systems/tina/issues/109)) ([1fb8d62](https://github.com/dynamite-systems/tina/commit/1fb8d62722bf294f172732e1dc21634aa9e47615))
+
 ## [0.1.6](https://github.com/raiderrobert/tina/compare/v0.1.5...v0.1.6) (2026-10-07)
 
 
